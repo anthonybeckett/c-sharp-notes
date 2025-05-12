@@ -37,7 +37,7 @@
     - [Overriding Validation Filter Attribute](#overriding-validation-filter-attribute)
 - [API](#api)
     - [Setup Authentication With Identity](#setup-authentication-with-identity)
-    - [Setup Authentication With Identity Newer Way](#setup-authentication-with-identity-newer-way)
+    - [Setup Authentication With Identity For Older Versions](#setup-authentication-with-identity-for-older-versions)
     - [Example CRUD Controller using .NET API](#example-crud-controller-using-net-api)
     - [Using REST Client Extension For API Calls](#using-rest-client-extension-for-api-calls)
     - [Using HTTP-Repl In The Command Line](#using-http-repl-in-the-command-line)
@@ -1242,6 +1242,168 @@ public class ValidationFilterAttribute : ActionFilterAttribute
 
 ### Setup Authentication With Identity
 
+There is a new, more simple way of implementing Authentication and Authorisation in .Net8.0+. This uses the `MapIdentityApi` to automatically add endpoints for implementing authentication. We can set it up like so.
+
+Start with installing some packages needed:
+
+```bash
+dotnet add package Microsoft.AspNetCore.Identity.EntityFrameworkCore
+dotnet add package Microsoft.EntityFrameworkCore.Sqlite
+dotnet add package Microsoft.EntityFrameworkCore.Design
+
+# Optional for later
+dotnet add package Microsoft.AspNetCore.Authentication.JwtBearer
+```
+
+Next, instead of making our own `User` model like we did in the old way, we can extend the `IdentityUser` class now included in Identity to add additional properties and fields. If we just want the defaults provided we can skip this step and just pass in the `IdentityUser` to the Context.
+
+```C#
+using Microsoft.AspNetCore.Identity;
+
+public class ApplicationUser : IdentityUser
+{
+    public string? DisplayName { get; set; }
+}
+```
+
+For our `AppDbContext` we inherit from `IdentityDbContext<>` instead of the old `DbContext`.
+
+```C#
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+
+public class AppDbContext : IdentityDbContext<ApplicationUser>
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+}
+```
+
+Next, in our `Program.cs` file, we can add the Authorization service and map the new endpoints. This is an example of the basic setup.
+
+```C#
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container.
+// Authorization
+builder.Services.AddAuthorization();
+
+// Configure identity database access via EF Core.
+builder.Services.AddDbContext<ApplicationDbContext>(
+    options => options.UseInMemoryDatabase("AppDb")
+);
+
+// Activate identity APIs. By default, both cookies and proprietary tokens
+// are activated. Cookies will be issued based on the `useCookies` querystring
+// parameter in the login endpoint.
+builder.Services.AddIdentityApiEndpoints<IdentityUser>()
+    .AddEntityFrameworkStores<ApplicationDbContext>();
+
+var app = builder.Build();
+
+app.UseHttpsRedirection();
+
+// Built-in endpoints like /register, /login, /me
+app.MapIdentityApi<IdentityUser>();
+
+app.Run();
+```
+
+By default, the above uses token based authentication.
+
+To use a cookie based authentication method provided by Identity, we can simply set `useCookies` to `true` when calling the `/login` endpoint.
+
+```json
+{
+  "email": "string",
+  "password": "string",
+  "useCookies": true
+}
+```
+
+Should we need to use JWT token based authentication for Mobile apps or other use cases, we can add this before calling the `builder.Services.AddIdentityApiEndpoints<>` service.
+
+```C#
+// JWT settings
+var jwtKey = "ThisIsAReallyStrongSecretForJwtDontUseInProd";
+var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+
+// Configure JWT auth
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = false,
+        ValidateAudience = false,
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = signingKey
+    };
+});
+```
+
+To make this more simple and re-usable in other projects, we can extract this logic into it's own class extension and call that instead.
+
+```C#
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
+public static class JwtExtensions
+{
+    public static IServiceCollection AddJwtAuthentication(this IServiceCollection services, IConfiguration config)
+    {
+        var jwtKey = config["Jwt:Key"];
+        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+
+        services.AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+            options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+        })
+        .AddJwtBearer(options =>
+        {
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = false,
+                ValidateAudience = false,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = signingKey
+            };
+        });
+
+        return services;
+    }
+}
+
+```
+
+Then we just need to add this to our `Program.cs` file.
+
+```C#
+builder.Services.AddJwtAuthentication(builder.Configuration);
+```
+
+Make sure we have this configured in our `appsettings.json`
+
+```json
+{
+  "Jwt": {
+    "Key": "ThisIsAReallyStrongSecretForJwtDontUseInProd"
+  }
+}
+```
+
+### Setup Authentication With Identity For Older Versions
+
 First we need to add some NuGet packages. We will also pull in a bCrypt package for hasing our password later on.
 
 ```bash
@@ -1400,153 +1562,6 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.Run();
-```
-
-### Setup Authentication With Identity Newer Way
-
-There is a newer and more simple way of implementing Authentication and Authorisation in .Net8.0+. This uses the `MapIdentityApi` to automatically add endpoints for implementing authentication. We can set it up like so.
-
-Start with installing some packages needed:
-
-```bash
-dotnet add package Microsoft.AspNetCore.Identity.EntityFrameworkCore
-dotnet add package Microsoft.EntityFrameworkCore.Sqlite
-dotnet add package Microsoft.AspNetCore.Authentication.JwtBearer
-```
-
-Next, instead of making our own `User` model like we did in the old way, we can extend the `IdentityUser` class now included in Identity to add additional properties and fields. If we just want the defaults provided we can skip this step and just pass in the `IdentityUser` to the Context.
-
-```C#
-using Microsoft.AspNetCore.Identity;
-
-public class ApplicationUser : IdentityUser
-{
-    public string? DisplayName { get; set; }
-}
-```
-
-For our `AppDbContext` we inherit from `IdentityDbContext<>` instead of the old `DbContext`.
-
-```C#
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore;
-
-public class AppDbContext : IdentityDbContext<ApplicationUser>
-{
-    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
-}
-```
-
-Next, in our `Program.cs` file, we can add the Authorization service and map the new endpoints. This is an example of the basic setup.
-
-```C#
-using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Add services to the container.
-// Authorization
-builder.Services.AddAuthorization();
-
-// Configure identity database access via EF Core.
-builder.Services.AddDbContext<ApplicationDbContext>(
-    options => options.UseInMemoryDatabase("AppDb")
-);
-
-// Activate identity APIs. By default, both cookies and proprietary tokens
-// are activated. Cookies will be issued based on the `useCookies` querystring
-// parameter in the login endpoint.
-builder.Services.AddIdentityApiEndpoints<IdentityUser>()
-    .AddEntityFrameworkStores<ApplicationDbContext>();
-
-var app = builder.Build();
-
-app.UseHttpsRedirection();
-
-// Built-in endpoints like /register, /login, /me
-app.MapIdentityApi<IdentityUser>();
-
-app.Run();
-```
-
-The above example gives us access to Cookie based authentication which is best for browser only applications. Should we need to use token based authentication for Mobile apps or other use cases, we can add this before calling the `builder.Services.AddIdentityApiEndpoints<>` service.
-
-```C#
-// JWT settings
-var jwtKey = "ThisIsAReallyStrongSecretForJwtDontUseInProd";
-var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-
-// Configure JWT auth
-builder.Services.AddAuthentication(options =>
-{
-    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-})
-.AddJwtBearer(options =>
-{
-    options.TokenValidationParameters = new TokenValidationParameters
-    {
-        ValidateIssuer = false,
-        ValidateAudience = false,
-        ValidateIssuerSigningKey = true,
-        IssuerSigningKey = signingKey
-    };
-});
-```
-
-To make this more simple and re-usable in other projects, we can extract this logic into it's own class extension and call that instead.
-
-```C#
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.IdentityModel.Tokens;
-using System.Text;
-
-public static class JwtExtensions
-{
-    public static IServiceCollection AddJwtAuthentication(this IServiceCollection services, IConfiguration config)
-    {
-        var jwtKey = config["Jwt:Key"];
-        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-
-        services.AddAuthentication(options =>
-        {
-            options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-            options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-        })
-        .AddJwtBearer(options =>
-        {
-            options.TokenValidationParameters = new TokenValidationParameters
-            {
-                ValidateIssuer = false,
-                ValidateAudience = false,
-                ValidateIssuerSigningKey = true,
-                IssuerSigningKey = signingKey
-            };
-        });
-
-        return services;
-    }
-}
-
-```
-
-Then we just need to add this to our `Program.cs` file.
-
-```C#
-builder.Services.AddJwtAuthentication(builder.Configuration);
-```
-
-Make sure we have this configured in our `appsettings.json`
-
-```json
-{
-  "Jwt": {
-    "Key": "ThisIsAReallyStrongSecretForJwtDontUseInProd"
-  }
-}
 ```
 
 ### Example CRUD Controller using .NET API
