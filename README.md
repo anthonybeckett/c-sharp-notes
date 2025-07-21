@@ -1312,6 +1312,16 @@ app.MapIdentityApi<IdentityUser>();
 app.Run();
 ```
 
+Once this is all set up, we just need to run our migration and can test the endpoints
+
+```bash
+# Create a migration
+dotnet ef migrations add {migrationName}
+
+# Run the migration
+dotnet ef database update
+```
+
 By default, the above uses token based authentication.
 
 To use a cookie based authentication method provided by Identity, we can simply set `useCookies` to `true` when calling the `/login` endpoint.
