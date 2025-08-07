@@ -27,6 +27,9 @@
     - [Setup SQLite](#setup-sqlite)
 - [Docker](#docker)
     - [Example Docker Compose With MS SQL Database](#example-docker-compose-with-ms-sql-database)
+    - [Setting Up Docker For Production & Development Environments](#setting-up-docker-for-production--development-environments)
+    - [Docker Issues](#docker-issues)
+    - [Docker Images & Tags](#docker-images--tags)
 - [Architecture](#architecture)
     - [Abstracting Dependency Injection Away From Program.cs](#abstracting-dependency-injection-away-from-programcs)
 - [Clean Architecture & DDD](#clean-architecture--ddd)
@@ -443,6 +446,83 @@ This works with this connection string in the json config file
   }
 }
 ```
+
+### Setting Up Docker For Production & Development Environments
+
+In this section, we will set up a DotNet application with docker to use in a production environment and a development environment with hot reloading.
+
+To start, lets make a `Dockerfile` for the production environment
+
+```Dockerfile
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS base
+USER $APP_UID
+WORKDIR /app
+EXPOSE 8080
+EXPOSE 8081
+
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build
+ARG BUILD_CONFIGURATION=Release
+WORKDIR /src
+COPY ["DockerExample/DockerExample.csproj", "DockerExample/"]
+RUN dotnet restore "DockerExample/DockerExample.csproj"
+COPY . .
+WORKDIR "/src/DockerExample"
+RUN dotnet build "./DockerExample.csproj" -c $BUILD_CONFIGURATION -o /app/build
+
+FROM build AS publish
+ARG BUILD_CONFIGURATION=Release
+RUN dotnet publish "./DockerExample.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "DockerExample.dll"]
+```
+
+We can now add this to a `docker-compose.yml` file normally created in the root of the project.
+
+```yml
+services:
+  dockerexample:
+    build:
+      context: .
+      dockerfile: DockerExample/Dockerfile
+    ports:
+      - "5000:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+```
+
+Next, we can create an override file which will automatically run our Development environment.
+
+Create a `docker-compose.override.yml` in your project root. We want to use the SDK directly and run the watch command against our app.
+
+```yml
+services:
+  dockerexample:
+    image: mcr.microsoft.com/dotnet/sdk:9.0-alpine
+    command: dotnet watch  --project DockerExample run --no-launch-profile
+    ports:
+      - "5001:8080"
+    volumes:
+      - .:/app
+    working_dir: /app
+    environment:
+      - DOTNET_USE_POLLING_FILE_WATCHER=1 
+      - ASPNETCORE_ENVIRONMENT=Development
+```
+
+### Docker Issues
+
+As of the time of writing this, I ran into some issues with the `mcr.microsoft.com/dotnet/sdk:9.0` image as it would not find the SDK when trying to build or run a container.
+
+At first I tried replacing it with `mcr.microsoft.com/dotnet/sdk:9.0-azurelinux3.0` which would run the first time, but then complain about a user not existing in the `passwd` file on the second run.
+
+Secondly I just replaced this and used the `mcr.microsoft.com/dotnet/sdk:9.0-alpine` as a workaround until the original 9.0 image is working again.
+
+### Docker Images & Tags
+
+Docker images and tags can be found here - https://mcr.microsoft.com/en-us/artifact/mar/dotnet/sdk/tags
 
 ## Architecture
 
