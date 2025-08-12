@@ -71,6 +71,7 @@
     - [Using Fluid To Generate HTML Template Emails](#using-fluid-to-generate-html-template-emails)
     - [Other Template Libraries](#other-template-libraries)
     - [MJML](#mjml)
+    - [Understanding SPF, DKIM, and DMARC for Email Sending](#understanding-spf-dkim-and-dmarc-for-email-sending)
 - [Dotnet MAUI](#dotnet-maui)
     - [Community ToolKit](#community-toolkit)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
@@ -3089,6 +3090,118 @@ class Program
     }
 }
 ```
+
+### Understanding SPF, DKIM, and DMARC for Email Sending
+
+
+When sending email, especially from your own domain, three important protocols help ensure deliverability and protect against spoofing and phishing: **SPF**, **DKIM**, and **DMARC**.
+
+---
+
+### 1. SPF (Sender Policy Framework)
+
+**Purpose:** Prevents spammers from sending emails pretending to be from your domain.
+
+**How it works:**
+- SPF is a **DNS TXT record** you add to your domain.
+- It lists the mail servers or services allowed to send emails on behalf of your domain.
+- When a recipient gets an email claiming to be from you, their email server checks your SPF record to see if the sending server is allowed.
+
+**Example DNS record:**
+
+```makefile
+v=spf1 include:sendgrid.net include:spf.protection.outlook.com -all
+```
+
+- `include:` → services allowed to send mail for your domain.
+- `-all` → fail if the sender is not on the list.
+
+To see what is being included from the addresses in the allowed list, we can use `nslookup`
+
+```bash
+# Run nslookup
+nslookup
+
+# Now we get a terminal instance we type commands into
+> set type=TXT
+> spf.protection.outlook.com
+
+# Should get a response like this
+Server:  TestRouter
+Address:  192.168.0.1
+
+Non-authoritative answer:
+spf.protection.outlook.com      text =
+
+"v=spf1 ip4:40.92.0.0/15 ip4:40.107.0.0/16 ip4:52.100.0.0/15 ip4:52.102.0.0/16 ip4:52.103.0.0/17 ip4:104.47.0.0/17 ip6:2a01:111:f400::/48 ip6:2a01:111:f403::/49 ip6:2a01:111:f403:8000::/51 ip6:2a01:111:f403:c000::/51 ip6:2a01:111:f403:f000::/52 -all"
+```
+
+**Why it matters:** Without SPF, attackers can spoof your address and send fake emails in your name.
+
+---
+
+### 2. DKIM (DomainKeys Identified Mail)
+
+**Purpose:** Ensures your email content hasn’t been altered and really came from your domain.
+
+**How it works:**
+- When you send an email, your mail server adds a **DKIM signature** (a cryptographic hash of the email) using a **private key**.
+- The recipient's mail server retrieves your **public key** from DNS and verifies the signature.
+- If the email is altered in transit, the verification fails.
+
+**Example DKIM DNS record (TXT):**
+
+```
+Name: selector1._domainkey.example.com
+Value: v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQE...
+```
+
+- `selector1` → allows key rotation.
+- `p=` → your public key.
+
+**Why it matters:** DKIM confirms that the message wasn’t forged or tampered with in transit.
+
+---
+
+### 3. DMARC (Domain-based Message Authentication, Reporting, and Conformance)
+
+**Purpose:** Tells recipients’ mail servers what to do if SPF and/or DKIM checks fail, and provides reports.
+
+**How it works:**
+- DMARC is another **DNS TXT record**.
+- It sets a policy for handling failed checks: accept, quarantine, or reject.
+- It can send **daily reports** showing who’s sending mail using your domain.
+
+**Example DMARC record:**
+
+```
+v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@example.com; sp=reject; aspf=s
+```
+
+- `p=quarantine` → suspicious emails go to spam.
+- `p=reject` → block the emails.
+- `rua=` → address for aggregate reports.
+- `aspf=s` → strict SPF alignment.
+
+**Why it matters:** DMARC ties SPF and DKIM together with an enforcement policy, making spoofing much harder.
+
+You can use record generators to help with this part. one example is by Mimecast and can be found here - https://www.mimecast.com/content/dmarc-record-generator/
+
+---
+
+### How They Work Together
+
+1. **SPF** → Checks *who* is allowed to send.
+2. **DKIM** → Checks if the email content is genuine.
+3. **DMARC** → Decides what happens if checks fail, and sends reports.
+
+**Analogy (Airport Security):**
+- **SPF** → Checks if the passenger is on the approved list.
+- **DKIM** → Confirms their ID matches and hasn’t been altered.
+- **DMARC** → Decides to let them in, send them to security, or deny entry — and logs the event.
+
+---
+
 
 ## Dotnet MAUI
 
