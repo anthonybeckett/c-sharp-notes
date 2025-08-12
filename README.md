@@ -64,10 +64,18 @@
     - [Seeding The Database](#seeding-the-database)
     - [Reverse-engineer from an existing database](#reverse-engineer-from-an-existing-database)
     - [MSSQL Connection String Example](#mssql-connection-string-example)
+- [Sending Emails](#sending-emails) 
+    - [Getting Started Example](#getting-started-example)
+    - [Setting Up Mailpit](#setting-up-mailpit)
+    - [Building Text Only Based Emails](#building-text-only-based-emails)
+    - [Using Fluid To Generate HTML Template Emails](#using-fluid-to-generate-html-template-emails)
+    - [Other Template Libraries](#other-template-libraries)
+    - [MJML](#mjml)
 - [Dotnet MAUI](#dotnet-maui)
     - [Community ToolKit](#community-toolkit)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
 - [Unit testing](#unit-testing)
+    - [Libraries](#libraries)
 - [Integration Testing](#integration-testing)
     - [Setup Notes](#setup-notes)
 - [CI/CD](#cicd)
@@ -2685,6 +2693,403 @@ This is for connecting to a local instance of the database
 },
 ```
 
+## Sending Emails
+
+### Getting Started Example
+
+The most common way these days to send emails with .NET is using NuGet packages.
+
+To start, add `MailKit` to your project.
+
+```bash
+dotnet add package MailKit
+```
+
+As a quick example, we can use something like this to construct emails and send.
+
+```C#
+using MailKit.Net.Smtp;
+using MimeKit;
+using MimeKit.Text;
+
+# Init the MIME message
+var message = new MimeMessage();
+
+# Set a from user
+var from = new MailboxAddress("From User", "fromuser@example.com");
+message.from.Add(from);
+
+# Set a to user, or users
+var to = new MailboxAddress("To User", "toUser@example.com");
+message.To.Add(to);
+
+# Add a subject
+message.Subject = "Example Subject";
+
+# Create the message body
+message.Body = new TextPart(TextFormat.Plain) {
+    Text = """
+    This is using a normal text output for a basic email.
+    """
+};
+
+# Using the BodyBuilder for different types
+var bodyBuilder = new BodyBuilder();
+
+bodyBuilder.TextBody = "Example using the text body";
+bodyBuilder.HtmlBody = "<p>Example using the html body</p>"
+
+message.body = bodyBuilder.ToMessageBody();
+
+# Adding an attachment
+bodyBuilder.Attachments.Add("image.jpg");
+
+# Adding an image into the message instead of an attachment
+var imageEntity = bodyBuilder.LinkedResources.Add("image.jpg");
+imageEntity.ContentId = MimeUtils.GenerateMessageId();
+
+bodyBuilder.HtmlBody = $"""
+<p>Test example text</p>
+
+<p>
+    <img src="cid:{imageEntity.ContentId}" />
+</p>
+""";
+
+# Connect to the SMTP server and send the message
+# When importing, make sure to use the SMTP Client from MailKit
+# and not the older one included in the dotnet library.
+using var smtp = new SmtpClient();
+
+await smtp.ConnectAsync("localhost", 1025);
+await smtp.SendAsync(message);
+await smtp.DisconnectAsync(true);
+```
+
+### Setting Up MailPit
+
+To set up MailPit, we can either run it directly on our machine using the Binary from Github or add it as a service with Docker Compose.
+
+To run with the Binary, download it to your machine and then run 
+
+```bash
+./mailpit --listen 0.0.0.0:1025 --ui-bind 0.0.0.0:8025
+```
+
+if we are using Docker Compose, we can add a service like this.
+
+```yml
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_UI_BIND_ADDR: 0.0.0.0:8025
+      MP_SMTP_BIND_ADDR: 0.0.0.0:1025
+```
+
+Once this is up and running, we can then just add some parameters to our `.env` file and map them inside our application.
+
+```bash
+SMTP_HOST=localhost
+SMTP_PORT=1025
+SMTP_USER=
+SMTP_PASS=
+```
+
+### Building Text Only Based Emails
+
+When building text only based emails, a good suggestion is to create a method then use the `StringBuilder` found in the `System.Text` library. This can make it easier when it comes to padding and adding dynamic data into your email.
+
+More information on the StringBuilder can be found here.
+
+https://learn.microsoft.com/en-us/dotnet/standard/base-types/stringbuilder
+
+A small code example using the `StringBuilder`
+
+```C#
+var sb = new StringBuilder();
+
+// Subject
+sb.AppendLine($"Subject: Your Order Confirmation - {productName}");
+sb.AppendLine();
+
+// Greeting
+sb.AppendLine($"Hello {recipientName},");
+sb.AppendLine();
+
+// Body
+sb.AppendLine($"Thank you for purchasing {productName}!");
+sb.AppendLine($"Your order number is {orderNumber}.");
+sb.AppendLine("We will notify you once your order has shipped.");
+sb.AppendLine();
+
+sb.AppendLine("If you have any questions, feel free to reply to this email or contact us at:");
+sb.AppendLine(supportEmail);
+sb.AppendLine();
+
+// Signature
+sb.AppendLine("Kind regards,");
+sb.AppendLine(senderName);
+```
+
+### Using Fluid To Generate HTML Template Emails
+
+Fluid is a templating engine we can use to easily generate emails.
+
+The Github Repo and Documentation can be found here:
+https://github.com/sebastienros/fluid
+
+To get started, we can install the package from NuGet
+
+```bash
+dotnet add package Fluid.Core
+```
+
+Fluid templates are just text files with placeholders and logic.
+
+Create a file named something like `OrderConfirmation.liquid.html` (the `.html` is not required here but helps with editors parsing the syntax)
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title></title>
+</head>
+
+<body>
+    <p>
+        Hello {{ recipientName }},
+
+        Thank you for purchasing {{ productName }}
+        Your order number is {{ orderNumber }}.
+
+        We will notify you once your order has shipped.
+    </p>
+
+    <p>Order items included:</p>
+
+    <ul>
+        {% for item in Items %}
+            <li>{{ item.Name }}</li>
+        {% endfor %}
+    </ul>
+
+    <p>
+        If you have any questions, contact us at:
+        {{ supportEmail }}
+
+        Kind regards,
+        {{ senderName }}
+    </p>
+</body>
+</html>
+```
+
+We can then render this in C# passing in a Model to populate any data we need to be dynamic.
+
+```C#
+using Fluid;
+
+namespace EmailTesting.Templates
+
+public class FluidEmailRenderer : IRenderHtmlEmails
+{
+    private static readonly FluidParser parser = new FluidParser();
+
+    private IFluidTemplate? template;
+
+    private static readonly TemplateOptions options = new();
+
+    // Example of giving the template engine access to nested objects inside the model.
+    static FluidEmailRenderer() {
+        options.MemberAccessStrategy.Register<Order>();
+        options.MemberAccessStrategy.Register<OrderItem>();
+
+        // If we want to disable this safe behaviuor, we can just add the following instead
+        // and give access to eevrything.
+        options.MemberAccessStrategy = new unsafeMemberAccessStrategy();
+    }
+
+    static IFluidTemplate ParseTemplate(string path) {
+        var liquid = File.ReadAllText(path);
+
+        return parser.Parse(liquid);
+    }
+
+    public string RenderHtmlBody(Order order)
+    {
+        template ??= ParseTemplate("Templates/Emails/OrderConfirmation.liquid.html");
+
+        var context = new TemplateContext(order, options);
+
+        return template.Render(context);
+    }
+}
+```
+
+When adding this into our DI Container, we may want to render it as a transient in debug mode so we see any changes made to the file each time. For production, we can just add this as a Singleton. This is an example of something we can add to our `Program.cs` or extension method when adding this service to our container. 
+
+This is just a basic example and in a real app, you would likely map it to use an interface which can switch out a new Renderer and sticking to the Open/Closed Principle.
+
+```C#
+#if DEBUG
+builder.Services.AddTransient<FluidEmailRenderer>();
+#else
+builder.Services.AddSingleton<FluidEmailRenderer>();
+#endif
+```
+
+We can also apply more things like filters for formatting and displaying information. This can be found in the documentation in the Github link at the start of this section.
+
+### Other Template Libraries
+
+Here is some more templating libraries available should Fluid not be the right choice.
+
+RazorEngine.NetCore - https://github.com/Antaris/RazorEngine
+
+Razor Components - https://learn.microsoft.com/en-us/aspnet/core/blazor/components/render-components-outside-of-aspnetcore?view=aspnetcore-9.0
+
+### MJML
+
+When trying to generate HTML emails, different clients handle the way they are received differently. Styles and CSS may work in one client but not the other. This is where MJML comes in. It is an open source framework used to generate HTML emails and make it easier to style your emails.
+
+You can get started by visiting their site - https://mjml.io/
+
+If you're using Visual Studio Code, you can also find an extension to help by searching MJML. You want the version which is by MJML as the one with the most downloads has now been archived. This helps with syntax highlighting and has a preview window to see what your email looks like.
+
+To get started with using NJNL with .NET, we first need to install the NuGet package
+
+```bash
+dotnet add package Mjml.Net
+
+# We may also need this package for adding some styles inline instead of using a style tag in the header
+dotnet add package mjml.Net.PostProcessors
+```
+
+We then can import a template using the MJML syntax and render out the HTML
+
+```C#
+using Mjml.Net;
+
+public class MjmlEmailRenderer(MjmlRenderer mjml)
+{
+    public string RenderHtmlBody() {
+        var mjmlSource.File.ReadAllText("Templates/Emails/OrderEmail.mjml");
+
+        var options = new MjmlOptions();
+
+        var (output, errrors) = mjml.Render(mjmlSource, options);
+
+        if (errors.Any()) throw new(errors.First().Error);
+
+        return output;
+    }
+}
+```
+
+To implement Liquid based templating syntax into MJML, we need to make some changes.
+
+Example of a template
+
+```xml
+<mjml>
+  <mj-head>
+    <mj-title>Order Confirmation</mj-title>
+    <mj-preview>Thanks for your purchase, {{ recipientName }}!</mj-preview>
+  </mj-head>
+  <mj-body>
+    <mj-section>
+      <mj-column>
+        <mj-text font-size="20px" font-weight="bold">
+          Hello {{ recipientName }},
+        </mj-text>
+
+        <mj-text>
+          Thank you for purchasing <strong>{{ productName }}</strong>!
+          Your order number is <strong>{{ orderNumber }}</strong>.
+        </mj-text>
+
+        <mj-button background-color="#346DB7" color="white" href="{{ orderUrl }}">
+          View Your Order
+        </mj-button>
+
+        <mj-text font-size="12px" color="#555">
+          If you have any questions, contact us at {{ supportEmail }}.
+        </mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>
+```
+
+We can then parse this and render it using something like this
+
+```C#
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading.Tasks;
+using Fluid;
+
+class Program
+{
+    static async Task Main()
+    {
+        // Load MJML file
+        var mjmlPath = Path.Combine(Directory.GetCurrentDirectory(), "OrderConfirmation.mjml");
+        var mjmlTemplate = await File.ReadAllTextAsync(mjmlPath);
+
+        // Parse the Liquid template
+        var parser = new FluidParser();
+        if (!parser.TryParse(mjmlTemplate, out var template, out var error))
+        {
+            Console.WriteLine($"Template parse error: {error}");
+            return;
+        }
+
+        // Template data
+        var model = new
+        {
+            recipientName = "Anthony",
+            productName = "Testing Email",
+            orderNumber = "MS-2025-000123",
+            orderUrl = "https://example.com/orders/MS-2025-000123",
+            supportEmail = "support@example.com"
+        };
+
+        var context = new TemplateContext(model);
+        var renderedMjml = await template.RenderAsync(context);
+
+        // Save the rendered MJML to file
+        var tempMjmlFile = Path.GetTempFileName() + ".mjml";
+        await File.WriteAllTextAsync(tempMjmlFile, renderedMjml);
+
+        // Use mjml CLI to convert to HTML
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "mjml",
+                Arguments = $"{tempMjmlFile} -o output.html",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            }
+        };
+
+        process.Start();
+        process.WaitForExit();
+
+        Console.WriteLine("Email HTML generated in output.html");
+    }
+}
+```
+
 ## Dotnet MAUI
 
 ### Community ToolKit
@@ -2767,6 +3172,12 @@ namespace UnitTestExample
     }
 }
 ```
+
+### Libraries
+
+Some nice to have libraries to make testing a little easier.
+
+Shouldly - https://docs.shouldly.org/
 
 ## Integration Testing
 
@@ -3263,4 +3674,9 @@ This setup provides a robust CI/CD pipeline for deploying a .NET application to 
 
 ## Cool Nuget Packages
 
-- Humaniser - Cool methods like humanizing strings, dates and numbers. E.g Last seen 2 hours ago.
+- Humaniser - https://github.com/Humanizr/Humanizer - Cool methods like humanizing strings, dates and numbers. E.g Last seen 2 hours ago.
+
+- AngleSharp - https://github.com/AngleSharp/AngleSharp - Provides a way of picking HTML formatted text with CSS seelctors etc.
+
+- PDFPig - https://github.com/UglyToad/PdfPig - PdfPig supports reading text and content from PDF files. It also supports basic PDF file creation.
+
