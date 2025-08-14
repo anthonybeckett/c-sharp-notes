@@ -37,6 +37,8 @@
     - [Layer Breakdown Examples](#layer-breakdown-examples)
     - [Setting Up A Project](#setting-up-a-project)
     - [Presentation Layer](#presentation-layer)
+    - [Application Layer](#application-layer)
+    - [Setting Up Dependency Injection Per Project](#setting-up-dependency-injection-per-project)
     - [Implementing A Repository From Interface With DI](#implementing-a-repository-from-interface-with-di)
     - [Unit & Integration Testing](#unit--integration-testing) 
     - [Overriding Validation Filter Attribute](#overriding-validation-filter-attribute)
@@ -912,6 +914,10 @@ dotnet add ./src/CleanArchitecture.Infrastructure reference ./src/CleanArchitect
 # Next we just need to add a reference from the Application layer to the Domain layer
 dotnet add ./src/CleanArchitecture.Application reference ./src/CleanArchitecture.Domain
 
+# Last, we will add a reference from Infrastrcture to ther Presentation Layer. 
+# The main reason for this is to access the DependencyInjection.cs file we will create later.
+dotnet add ./src/CleanArchitecture.Api reference ./src/CleanArchitecture.Infrastructure
+
 # Now we add a solution and add all our projects
 dotnet new sln --name "CleanArchitecture"
 
@@ -941,7 +947,76 @@ The presentation layer has the following responsibilities
 - Managing UI and framework related elements
 - Manipulating the Application layer
 
+### Application Layer
 
+The Application layers main responsibility is to execute use cases. This can be fetching or manipulating domain objects.
+
+Some examples could be:
+    - Creating record
+    - Deleting record
+    - Updating record
+    - List all records
+
+There is two ways this can also be structured. One is using the Services pattern or we can use a library `Mediatr`. Normally everything is split out and following `CQRS` (Command Query Responsibility Segregation). It can be up to the developer to depend how deep they want to go into this.
+
+A small example of using Services (all kept in one file here but split it out into it's own files).
+
+```C#
+namespace CleanArchitecture.Application.Services
+
+public interface IRecordService
+{
+    public Guid CreateRecord(string recordName, Guid userId);
+}
+
+public class RecordService : IRecordService
+{
+    public Guid CreateRecord(string recordName, Guid userId)
+    {
+        return Guid.NewGuid();
+    }
+}
+```
+
+We can then inject this service into our Controller in the Presentation layer and call the `CreateRecord()` method passing in data.
+
+
+### Setting Up Dependency Injection Per Project
+
+When it comes to registering services in the Application or Infrastructure layers, we do not want to be placing them all individually in the `Program.cs` file as this will get very large, messy. It is easier to create a `DepencyInjection.cs` file in each of these layers then just register it once per project in the `Program.cs` file.
+
+We will need to access the `IServicesCollection` which can be added through a `NuGet` package.
+
+```bash
+dotnet add ./src/CleanArchitecture/Application package Microsoft.Extensions.DependencyInjection.Abstractions
+```
+
+An example of the `DependencyInjection.cs` file.
+
+```C#
+using CleanArchitecture.Application.Services;
+using Microsoft.Extensions.DepencyInjection;
+
+namespace CleanArchitecture.Application
+
+public static class DependencyInjection
+{
+    public static IServicesCollection AddApplication(this IServicesCollection services)
+    {
+        services.AddScoped<IRecordService, RecordService>();
+
+        return services;
+    }
+}
+```
+
+We then just need to add this line to our `Program.cs`
+
+```C#
+builder.Services.AddApplication();
+```
+
+Don't forget to rename the method to `AddInfrastructure()` when creating this in the Infrastructure layer.
 
 
 ### Implementing A Repository From Interface With DI
