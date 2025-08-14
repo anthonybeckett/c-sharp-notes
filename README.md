@@ -35,6 +35,8 @@
 - [Clean Architecture & DDD](#clean-architecture--ddd)
     - [Introduction](#introduction)
     - [Layer Breakdown Examples](#layer-breakdown-examples)
+    - [Setting Up A Project](#setting-up-a-project)
+    - [Presentation Layer](#presentation-layer)
     - [Implementing A Repository From Interface With DI](#implementing-a-repository-from-interface-with-di)
     - [Unit & Integration Testing](#unit--integration-testing) 
     - [Overriding Validation Filter Attribute](#overriding-validation-filter-attribute)
@@ -72,6 +74,8 @@
     - [Other Template Libraries](#other-template-libraries)
     - [MJML](#mjml)
     - [Understanding SPF, DKIM, and DMARC for Email Sending](#understanding-spf-dkim-and-dmarc-for-email-sending)
+    - [Using Thread Channels To Send Emails In The Background](#using-thread-channels-to-send-emails-in-the-background)
+    - [Example Of Keeping The SMTP Client Alive For Multiple Messages](#example-of-keeping-the-smtp-client-alive-for-multiple-messages)
 - [Dotnet MAUI](#dotnet-maui)
     - [Community ToolKit](#community-toolkit)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
@@ -872,6 +876,73 @@ public class OrderController : ControllerBase
     }
 }
 ```
+
+### Setting Up A Project
+
+This is a guide on how to set up a project using the Dotnet CLI. This can also be done with Visual Studio or Jetbrains Rider through the new project commands and adding the relevant references to each library.
+
+With a bit of tweaking, you can add a project name variable and make this a script to make this easier in the future.
+
+```bash
+# Create a folder and change into it
+mkdir CleanArchitecture && cd CleanArchitecture
+
+# Create a src folder for all the code to live in
+mkdir src
+
+# Create the API/Presentation layer
+dotnet new webapi -o ./src/CleanArchitecture.Api
+
+# Create the Application layer
+dotnet new classlib -o ./src/CleanArchitecture.Application
+
+# Create the Infrastructure layer
+dotnet new classlib -o ./src/CleanArchitecture.Infrastructure
+
+# Create the Domain layer
+dotnet new classlib -o ./src/CleanArchitecture.Domain
+
+# Lets add our references for each layer
+# First we will add the Api/Presentation layer to the Application layer
+dotnet add ./src/CleanArchitecture.Api reference ./src/CleanArchitecture.Application
+
+# We also need to map the Infrastructure layer to the Application layer
+dotnet add ./src/CleanArchitecture.Infrastructure reference ./src/CleanArchitecture.Application
+
+# Next we just need to add a reference from the Application layer to the Domain layer
+dotnet add ./src/CleanArchitecture.Application reference ./src/CleanArchitecture.Domain
+
+# Now we add a solution and add all our projects
+dotnet new sln --name "CleanArchitecture"
+
+# For Linux Or Mac OS run this
+dotnet sln add ./src/**/**.csproj
+
+# Run this for Windows
+dotnet sln add (ls -r ./src/**/**.csproj)
+
+# Check it build successfully
+dotnet build
+```
+
+To start the project using the dotnet tool, we can run the following
+
+```bash
+dotnet run --project src/CleanArchitecture.Api
+```
+
+### Presentation Layer
+
+The presentation layer has the following responsibilities
+
+- Handling interactions with the outside world
+- Presenting or displaying data
+- Translating data (e.g Json to a DTO or the other way around)
+- Managing UI and framework related elements
+- Manipulating the Application layer
+
+
+
 
 ### Implementing A Repository From Interface With DI
 
@@ -3202,6 +3273,224 @@ You can use record generators to help with this part. one example is by Mimecast
 
 ---
 
+
+### Using Thread Channels To Send Emails In The Background
+
+When we want to make our application more responsive, we can use `System.Threading.Channels` to run a process in the background and push emails to the queue to send.
+
+An example of how to get this up and running:
+
+```C#
+using System;
+using System.Net;
+using System.Net.Mail;
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
+
+public record EmailMessage(string To, string Subject, string Body);
+
+public class BackgroundEmailSender : IDisposable
+{
+    private readonly Channel<EmailMessage> _channel;
+    private readonly CancellationTokenSource _cts;
+    private readonly Task _processingTask;
+
+    public BackgroundEmailSender()
+    {
+        _channel = Channel.CreateUnbounded<EmailMessage>();
+        _cts = new CancellationTokenSource();
+        _processingTask = Task.Run(ProcessEmailsAsync);
+    }
+
+    public async Task QueueEmailAsync(EmailMessage message)
+    {
+        await _channel.Writer.WriteAsync(message);
+    }
+
+    private async Task ProcessEmailsAsync()
+    {
+        try
+        {
+            await foreach (var email in _channel.Reader.ReadAllAsync(_cts.Token))
+            {
+                try
+                {
+                    using var smtp = new SmtpClient("smtp.example.com", 587)
+                    {
+                        Credentials = new NetworkCredential("username", "password"),
+                        EnableSsl = true
+                    };
+
+                    var mail = new MailMessage("sender@example.com", email.To, email.Subject, email.Body)
+                    {
+                        IsBodyHtml = true
+                    };
+
+                    await smtp.SendMailAsync(mail);
+                    Console.WriteLine($"Sent email to {email.To}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to send email to {email.To}: {ex.Message}");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal when shutting down
+        }
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _processingTask.Wait();
+        _cts.Dispose();
+    }
+}
+
+class Program
+{
+    static async Task Main()
+    {
+        using var emailSender = new BackgroundEmailSender();
+
+        Console.WriteLine("Queueing emails...");
+        await emailSender.QueueEmailAsync(new EmailMessage(
+            "recipient1@example.com",
+            "Test Email 1",
+            "Hello from Thread Channels!"
+        ));
+
+        await emailSender.QueueEmailAsync(new EmailMessage(
+            "recipient2@example.com",
+            "Test Email 2",
+            "This is queued and sent in the background."
+        ));
+
+        Console.WriteLine("Main thread doing other work...");
+        
+        // This is not required, but if you're testing in a console app, we need to keep alive the application while it processes the queue
+        await Task.Delay(5000);
+    }
+}
+```
+
+### Example Of Keeping The SMTP Client Alive For Multiple Messages
+
+This is an example version of how to keep the SMTP Client alive when sending multiple emails so the code doesn't keep connecting and disconnecting and slowing down each message sent.
+
+```C#
+using MailKit.Net.Smtp;
+using MailKit.Security;
+using MimeKit;
+
+namespace Rockaway.WebApp.Services.Mail;
+
+public class SmtpMailSender(
+	SmtpSettings smtpSettings,
+	ILogger<SmtpMailSender> logger
+) : IMailSender, IDisposable {
+
+	public async Task<string> SendAsync(MimeMessage message) {
+		using var smtp = new SmtpClient();
+
+		await smtp.ConnectAsync(smtpSettings.Host, smtpSettings.Port,
+			SecureSocketOptions.StartTlsWhenAvailable);
+
+		if (smtpSettings.Authenticate)
+			await smtp.AuthenticateAsync(smtpSettings.Username, smtpSettings.Password);
+
+		var result = await smtp.SendAsync(message);
+
+		await smtp.DisconnectAsync(true);
+
+		return result;
+	}
+
+	public async Task<string> SendAsync(MimeMessage message, CancellationToken token) {
+		await semaphore.WaitAsync(token);
+
+		var result = "ERROR";
+
+		try {
+			await ConnectAsync(token);
+
+			result = await smtpClient.SendAsync(message, token);
+		} catch (Exception ex) {
+			logger.LogError(ex, "SendAsync");
+
+			throw;
+		} finally {
+			semaphore.Release();
+		}
+
+		return result;
+	}
+
+	private readonly SmtpClient smtpClient = new();
+
+	private static readonly TimeSpan smtpClientTimeout = TimeSpan.FromSeconds(10);
+
+	private DateTimeOffset disconnectAfter = DateTimeOffset.MinValue;
+
+	private readonly SemaphoreSlim semaphore = new(1, 1);
+
+	private void ScheduleDisconnect(CancellationToken token) {
+		disconnectAfter = DateTimeOffset.UtcNow.Add(smtpClientTimeout);
+
+		Task.Run(async () => {
+			await Task.Delay(smtpClientTimeout.Add(TimeSpan.FromSeconds(1)), token);
+
+			if (DateTimeOffset.UtcNow > disconnectAfter) await DisconnectAsync(token);
+
+		}, token);
+	}
+
+	private async Task ConnectAsync(CancellationToken token) {
+		if (smtpClient.IsConnected) {
+			await smtpClient.NoOpAsync(token);
+		} else {
+			await smtpClient.ConnectAsync(smtpSettings.Host, smtpSettings.Port,
+				SecureSocketOptions.StartTlsWhenAvailable, token);
+
+			if (smtpSettings.Authenticate)
+				await smtpClient.AuthenticateAsync(smtpSettings.Username, smtpSettings.Password, token);
+		}
+
+		ScheduleDisconnect(token);
+	}
+
+	private async Task DisconnectAsync(CancellationToken token) {
+		await semaphore.WaitAsync(token);
+
+		try {
+			if (!smtpClient.IsConnected) return;
+
+			await smtpClient.DisconnectAsync(true, token);
+
+			disconnectAfter = DateTimeOffset.MinValue;
+		} catch (Exception ex) {
+			logger.LogError(ex, "DisconnectAsync");
+
+			throw;
+		} finally {
+			semaphore.Release();
+		}
+	}
+
+	public void Dispose() {
+		smtpClient.DisconnectAsync(true);
+
+		smtpClient.Dispose();
+
+		semaphore.Dispose();
+
+		GC.SuppressFinalize(this);
+	}
+}
+```
 
 ## Dotnet MAUI
 
