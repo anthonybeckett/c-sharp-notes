@@ -38,8 +38,14 @@
     - [Setting Up A Project](#setting-up-a-project)
     - [Presentation Layer](#presentation-layer)
     - [Application Layer](#application-layer)
+    - [Infrastructure Layer](#infrastructure-layer)
     - [Setting Up Dependency Injection Per Project](#setting-up-dependency-injection-per-project)
     - [Implementing A Repository From Interface With DI](#implementing-a-repository-from-interface-with-di)
+    - [Implementing CQRS & Mediatr](#implementing-cqrs--mediatr)
+    - [Result Pattern](#result-pattern)
+    - [Repository Pattern](#repository-pattern)
+    - [Setting Up Entity Framework Core](#setting-up-entity-framework-core)
+    - [Unit Of Work Pattern](#unit-of-work-pattern)
     - [Unit & Integration Testing](#unit--integration-testing) 
     - [Overriding Validation Filter Attribute](#overriding-validation-filter-attribute)
 - [API](#api)
@@ -980,6 +986,15 @@ public class RecordService : IRecordService
 
 We can then inject this service into our Controller in the Presentation layer and call the `CreateRecord()` method passing in data.
 
+### Infrastructure Layer
+
+The infrastructure layer deals with any persistent solutions such as database, file storage etc as well as connecting with 3rd party APIs and Services.
+
+Responsibilities include:
+- Interacting with persistent solutions
+- Interacting with other services (web clients, message brokers etc)
+- Interacting with the underlying machine (system clock, files etc)
+- Identity concerns (Authentication & Authorization)
 
 ### Setting Up Dependency Injection Per Project
 
@@ -997,7 +1012,7 @@ An example of the `DependencyInjection.cs` file.
 using CleanArchitecture.Application.Services;
 using Microsoft.Extensions.DepencyInjection;
 
-namespace CleanArchitecture.Application
+namespace CleanArchitecture.Application;
 
 public static class DependencyInjection
 {
@@ -1219,6 +1234,504 @@ Main points:
 - Presentation Layer: Injects the service in controllers or APIs.
 
 This setup ensures separation of concerns, testability, and maintainability in a Clean Architecture project.
+
+### Implementing CQRS & Mediatr
+
+CQRS stands for Command Query Responsibility Segregation which is basically splitting the read queries from the write queries. 
+
+It is not the same as the CQS (Command Query Segregation) pattern, as it is more strict on returning void when writing data. 
+
+A small example 
+
+```C#
+public class RecordService
+{
+    // Valid in CQRS but not CQS
+    Record CreateRecord(string name);
+
+    // To make it CQS compatible, don't return anything from the write command
+    void CreateRecord(string name);
+}
+```
+
+If we previously choose to take the Service pattern, the easiest way to implement CQRS would be to split your Service into Read & Write.
+
+```C#
+// Old service
+public class OrderService
+{
+    private readonly IOrderRepository _orderRepository;
+
+    public OrderService(IOrderRepository orderRepository)
+    {
+        _orderRepository = orderRepository;
+    }
+
+    public async Task<IEnumerable<Order>> GetAllOrdersAsync()
+    {
+        return await _orderRepository.GetAllAsync();
+    }
+
+    public async Task<Order> GetOrderByIdAsync(Guid id)
+    {
+        return await _orderRepository.GetByIdAsync(id);
+    }
+
+    public async Task AddOrderAsync(Order order)
+    {
+        await _orderRepository.AddAsync(order);
+    }
+}
+
+// Can now be turned into this
+public class OrderReadService
+{
+    private readonly IOrderRepository _orderRepository;
+
+    public OrderReadService(IOrderRepository orderRepository)
+    {
+        _orderRepository = orderRepository;
+    }
+
+    public async Task<IEnumerable<Order>> GetAllOrdersAsync()
+    {
+        return await _orderRepository.GetAllAsync();
+    }
+
+    public async Task<Order> GetOrderByIdAsync(Guid id)
+    {
+        return await _orderRepository.GetByIdAsync(id);
+    }
+}
+
+public class OrderWriteService
+{
+    private readonly IOrderRepository _orderRepository;
+
+    public OrderWriteService(IOrderRepository orderRepository)
+    {
+        _orderRepository = orderRepository;
+    }
+
+    public async Task<Order> GetOrderByIdAsync(Guid id)
+    {
+        return await _orderRepository.GetByIdAsync(id);
+    }
+}
+```
+
+Now if we want to implement the Mediatr pattern instead, we need to reduce the coupling between ther classes and use a Mediatr class instead which sits in between and handles the referencing and calls.
+
+The simplest way of getting started with this is using the `MediatR` package, but this does require a paid license in a commercial setting. We can install this into our Application layer.
+
+```bash
+dotnet add src/CleanArchitecture.Application package MediatR
+```
+
+To get started, we can inject the `MediatR` library into the controller we want to use to access data.
+
+```C#
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+
+namespace CleanArchitecture.Api.Controllers;
+
+[ApiController]
+[Route("[controller]")]
+public class RecordController(ISender mediatr) : ControllerBase
+{
+    [HttpPost]
+    public async Task<IActionResult> CreateRecord(CreateRecordRequest request)
+    {
+        // First we need to make an instance of the relevant command
+        // the named parameters are optional, just did it for ease of reading
+        var command = new CreateRecordCommand(name: request.recordName, userId: request.userId);
+
+        // Call the send method with the command we just created as an argument
+        var recordId = await mediatr.Send(command);
+
+        return Ok(recordId);
+    }
+}
+```
+
+Now in the Application layer, we need to make the relevant `Command|Query` and `CommandHandler|QueryHandler` depending on what we want to do.
+
+This is the typical kind of layout to create our `Command|Query`
+
+```C#
+using Mediatr;
+
+namespace CleanArchitecture.Application.Records.Commands.CreateRecordCommand;
+
+// We need to add the IRequest<> interface and pass in the data type we want to 
+// return. In this case, it is a Guid for our recordId
+public record CreateRecordCommand(string name, Guid userId) : IRequest<Guid>;
+```
+
+Next, we need to implement the `CommandHandler|QueryHandler` and typically looks something like this.
+
+```C#
+using Mediatr;
+
+namespace CleanArchitecture.Application.Records.Commands.CreateRecordCommandHandler;
+
+// For this class, we implement the IRequestHandler interface which takes two 
+// arguments, the first is the Query or Command we are implementing, the second
+// is the return type
+public class CreateRecordCommandHandler : IRequestHandler<CreateRecordCommand, Guid>
+{
+    // This method is required by the interface to call the logic we want to implement
+    public Task<Guid> Handle(CreateRecordCommand request, CancellationToken token)
+    {
+        // Implement calls to the DB etc and return the data
+    }
+}
+```
+
+Finally, we need to wire this up with our DI container in the Application layer.
+
+```C#
+using CleanArchitecture.Application.Services;
+using Microsoft.Extensions.DepencyInjection;
+
+namespace CleanArchitecture.Application;
+
+public static class DependencyInjection
+{
+    public static IServicesCollection AddApplication(this IServicesCollection services)
+    {
+        services.AddMediatR(options => {
+            options.RegisterServicesFromAssemblyContaining(typeof(DependencyInjection));
+        })
+
+        return services;
+    }
+}
+```
+
+### Result Pattern
+
+The Result Pattern is a design pattern where methods return a wrapper object (often called `Result`, `OperationResult`, or similar) that clearly indicates success or failure, along with any associated data or error messages.
+
+Instead of throwing exceptions everywhere or just returning raw values, you explicitly return a Result object like:
+
+**Success** - The operation worked, and you get the expected data back.
+
+**Failure** - The operation failed, and you have structured information about why (error message, error code, validation issues, etc.).
+
+To build this raw, you would do something like this:
+
+```C#
+public class Result<T>
+{
+    public bool IsSuccess { get; }
+    public bool IsFailure => !IsSuccess;
+    public string Error { get; }
+    public T Value { get; }
+
+    private Result(bool isSuccess, T value, string error)
+    {
+        IsSuccess = isSuccess;
+        Value = value;
+        Error = error;
+    }
+
+    public static Result<T> Success(T value) => new Result<T>(true, value, string.Empty);
+    public static Result<T> Failure(string error) => new Result<T>(false, default!, error);
+}
+```
+
+and then it can be used like this:
+
+```C#
+var result = userService.CreateUser("john@example.com");
+
+if (result.IsSuccess)
+{
+    Console.WriteLine($"User created: {result.Value.Id}");
+}
+else
+{
+    Console.WriteLine($"Error: {result.Error}");
+}
+```
+
+If you're feeling lazy and would rather just implement a package, an example is using something like `ErrorOr`
+
+We can install it using the command
+
+```bash
+dotnet add CleanArchitecture/Application package ErrorOr
+```
+
+We then just implement it wrapped around our return type in our Commands/Queries and Handlers like
+
+```C#
+using Mediatr;
+using ErrorOr;
+
+namespace CleanArchitecture.Application.Records.Commands.CreateRecordCommand;
+
+public record CreateRecordCommand(string name, Guid userId) : IRequest<ErrorOr<Guid>>;
+```
+
+In our `CommandHandler` here, we can also just add something like this
+
+```C#
+using Mediatr;
+using ErrorOr;
+
+namespace CleanArchitecture.Application.Records.Commands.CreateRecordCommandHandler;
+
+public class CreateRecordCommandHandler : IRequestHandler<CreateRecordCommand, ErrorOr<Guid>>
+{
+    public async Task<ErrorOr<Guid>> Handle(CreateRecordCommand request, CancellationToken token)
+    {
+        // Implement calls to the DB etc and return the data
+
+        if (result == null) {
+            return Error.NotFound();
+        }
+
+        return result.userId;
+    }
+}
+```
+
+In our controller, we then just handle the response
+
+```C#
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+
+namespace CleanArchitecture.Api.Controllers;
+
+[ApiController]
+[Route("[controller]")]
+public class RecordController(ISender mediatr) : ControllerBase
+{
+    [HttpPost]
+    public async Task<IActionResult> CreateRecord(CreateRecordRequest request)
+    {
+        var command = new CreateRecordCommand(name: request.recordName, userId: request.userId);
+
+        var recordResult = await mediatr.Send(command);
+
+        if (recordResult.IsError) {
+            return Problem();
+        }
+
+        return Ok(recordResult.Value);
+    }
+}
+```
+
+You can also make a quick one liner as a return.
+
+```C#
+return recordResult.MatchFirst(
+    userId => Ok(userId),
+    error => Problem
+);
+```
+
+### Repository Pattern
+
+We are now going to start implementing our Repositories. Because our Application or Domain layer cannot call upwards into the Infrastructure layer, we create our interface in either layer it needs access then use Dependency Inversion to fetch our concrete implementation through dependency injection.
+
+To start, we can make a `Common` directory. We then make a `Interfaces` directory and make a `IRecordsRepository.cs`
+
+```C#
+using CleanArchitecture.Domain.Records;
+
+namespace CleanArchitecture.Application.Common.Interfaces;
+
+public interface IRecordsRepository
+{
+    void AddRecord(Record record);
+}
+```
+
+Now in the `Infrastructure` layer, we need to add our concrete implementation.
+
+Lets make a `Records` directory, then inside that make a `Persistence` directory then create our `RecordRepository.cs` file.
+
+```C#
+using CleanArchitecture.Application.Common.Interfaces;
+using CleanArchitecture.Domain.Records;
+
+namespace CleanArchitecture.Infrastructure.Records.Persistence;
+
+public class RecordsRepository : IRecordsRepository
+{
+    public Task AddRecordsAsync(Record record)
+    {
+        // Logic of the database call goes here using Entity Framework Core or Dapper etc
+    }
+}
+```
+
+Then we can map it in our `DependencyInjection.cs` file in our `Infrastructure` layer
+
+```C#
+using Microsoft.Extensions.DependencyInjection;
+using CleanArchitecture.Application.Common.Interfaces;
+
+namespace CleanArchitecture.Infrastructure;
+
+public static class DependencyInjection
+{
+    public static IServiceCollection AddInfrastructure(this IServiceCollection services)
+    {
+        services.AddScoped<IRecordsRepository, RecordsRepository>();
+
+        return services;
+    }
+}
+```
+
+### Setting Up Entity Framework Core
+
+In this section, we will set up Entity Framework Core in our Infrastructure layer.
+
+To begin, lets add the package
+
+```bash
+dotnet add src/CleanArchitecture.Infrastructure package Microsoft.EntityFrameworkCore
+
+# Lets also set this up with Sqlite in this example
+dotnet add src/CleanArchitecture.Infrastructure package Microsoft.EntityFrameworkCore.Sqlite
+```
+
+Now we need to add our DbContext. (File structure same as namespace).
+
+This can start as one context but be broken out into sections when the application grows.
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using CleanArchitecture.Domain.Records;
+
+namespace CleanArchitecture.Infrastructure.Common.Persistence;
+
+public class ApplicationDbContext : DbContext
+{
+    public DbSet<Record> Records { get; set; } = null!;
+
+    public ApplicationDbContext(DbContextOptions options) : base(options)
+    {
+        //
+    }
+}
+```
+
+We also need to register this in our Dependency Injection.
+
+```C#
+using Microsoft.Extensions.DependencyInjection;
+using CleanArchitecture.Application.Common.Interfaces;
+
+namespace CleanArchitecture.Infrastructure;
+
+public static class DependencyInjection
+{
+    public static IServiceCollection AddInfrastructure(this IServiceCollection services)
+    {
+        services.AddDbContext<ApplicationDbContext>(options => options.UseSqlite("Data Source = CleanArchitecture.db"));
+
+        services.AddScoped<IRecordsRepository, RecordsRepository>();
+
+        return services;
+    }
+}
+```
+
+Now we need to set up migrations. Lets add the Entity Framework Core Design package to our `Presentation` layer. We can then run the migrations once this is installed.
+
+```bash
+# Install the package
+dotnet add src/CleanArchitecture.Api package Microsoft.EntityFrameworkCore.Design
+
+# Create the migrations
+# -p = Project our DbContext lives
+# -s = Startup project
+dotnet ef migrations add initialCreate -p src/CleanArchitecture.Infrastructure -s src/CleanArchitecture.Api
+
+# Run the migrations
+dotnet ef database update -p src/CleanArchitecture.Infrastructure -s src/CleanArchitecture.Api
+```
+
+Now we can just inject the context into any repositories and start calling our queries.
+
+### Unit Of Work Pattern
+
+The `Unit Of Work` pattern is a way of wrapping all our queries we want to call in a Command in a database transaction. This way, we call a commit method at the end and either all queries run successfully, or if something goes wrong everything is rolled back and an error is sent back to the user etc.
+
+We can start with adding an interface in our Application or Domain layer (depending on preference) called `IUnitOfWork.cs`
+
+```C#
+namespace CleanArchitecture.Application.Common.Interfaces;
+
+public interface IUnitOfWork
+{
+    Task CommitChangesAsync();
+}
+```
+
+Now, if we have EntityFrameworkCore set up, we need to add the `IUnitOfWork` interface to our context.
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using CleanArchitecture.Domain.Records;
+
+namespace CleanArchitecture.Infrastructure.Common.Persistence;
+
+public class ApplicationDbContext : DbContext, IUnitOfWork
+{
+    public DbSet<Record> Records { get; set; } = null!;
+
+    public ApplicationDbContext(DbContextOptions options) : base(options)
+    {
+        //
+    }
+
+    public async Task CommitChangesAsync()
+    {
+        await base.SaveChangesAsync();
+    }
+}
+```
+
+We just need to wire this up to Dependency Injection
+
+```C#
+using Microsoft.Extensions.DependencyInjection;
+using CleanArchitecture.Application.Common.Interfaces;
+using CleanArchitecture.Infrastructure.Common.Persistence;
+
+namespace CleanArchitecture.Infrastructure;
+
+public static class DependencyInjection
+{
+    public static IServiceCollection AddInfrastructure(this IServiceCollection services)
+    {
+        services.AddDbContext<ApplicationDbContext>(options => options.UseSqlite("Data Source = CleanArchitecture.db"));
+
+        services.AddScoped<IRecordsRepository, RecordsRepository>();
+        services.AddScoped<IUnitOfWork>(serviceProvider => serviceProvider.GetRequiredService<ApplicationDbContext>());
+
+        return services;
+    }
+}
+```
+
+In our `Application` layer within our `CommandHandler`, we can then call this with these two commands. If you miss the unitOfWork line, the changes won't save to the database.
+
+```C#
+recordsRepository.AddRecordsAsync(record);
+
+unitOfWork.SaveChangesAsync();
+```
 
 ### Unit & Integration Testing
 
