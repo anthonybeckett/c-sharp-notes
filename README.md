@@ -39,6 +39,7 @@
     - [Presentation Layer](#presentation-layer)
     - [Application Layer](#application-layer)
     - [Infrastructure Layer](#infrastructure-layer)
+    - [Domain Layer](#domain-layer)
     - [Setting Up Dependency Injection Per Project](#setting-up-dependency-injection-per-project)
     - [Implementing A Repository From Interface With DI](#implementing-a-repository-from-interface-with-di)
     - [Implementing CQRS & Mediatr](#implementing-cqrs--mediatr)
@@ -46,6 +47,8 @@
     - [Repository Pattern](#repository-pattern)
     - [Setting Up Entity Framework Core](#setting-up-entity-framework-core)
     - [Unit Of Work Pattern](#unit-of-work-pattern)
+    - [Using Fluent Api With Domain Objects And EF Core](#using-fluent-api-with-domain-objects-and-ef-core)
+    - [Domain Driven Design](#domain-driven-design)
     - [Unit & Integration Testing](#unit--integration-testing) 
     - [Overriding Validation Filter Attribute](#overriding-validation-filter-attribute)
 - [API](#api)
@@ -996,6 +999,80 @@ Responsibilities include:
 - Interacting with the underlying machine (system clock, files etc)
 - Identity concerns (Authentication & Authorization)
 
+### Domain Layer
+
+The Domain Layer is the core of the application in Clean Architecture.
+It contains the business rules and logic, expressed through entities, value objects, domain services, and events.
+
+- It is independent of external concerns (databases, UI, frameworks).
+
+- It defines what the system does, not how it is implemented.
+
+- Other layers (Application, Infrastructure, Presentation) depend on the Domain, but the Domain depends on nothing.
+
+Responsibilities include:
+- Defining domain models
+- Defining domain errors
+- Executing business logic
+- Enforcing business rules
+
+An example of a Rich Domain Model:
+
+```C#
+namespace CleanArchitecture.Domain.Records;
+
+public class Record
+{
+    public Guid Id { get; private set; }
+    public string Title { get; private set; }
+    public string Email { get; private set; }
+    public DateTime CreatedAt { get; private set; }
+
+    private Record() { } // Required for EF Core or serialization
+
+    public Record(string title, string email)
+    {
+        Id = Guid.NewGuid();
+        CreatedAt = DateTime.UtcNow;
+
+        SetTitle(title);
+        SetEmail(email);
+    }
+
+    public void SetTitle(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ArgumentException("Title cannot be empty.", nameof(title));
+
+        Title = title.Trim();
+    }
+
+    public void SetEmail(string email)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email cannot be empty.", nameof(email));
+
+        if (!IsValidEmail(email))
+            throw new ArgumentException("Email format is invalid.", nameof(email));
+
+        Email = email.Trim();
+    }
+
+    private bool IsValidEmail(string email)
+    {
+        try
+        {
+            var addr = new System.Net.Mail.MailAddress(email);
+            return addr.Address == email;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+```
+
 ### Setting Up Dependency Injection Per Project
 
 When it comes to registering services in the Application or Infrastructure layers, we do not want to be placing them all individually in the `Program.cs` file as this will get very large, messy. It is easier to create a `DepencyInjection.cs` file in each of these layers then just register it once per project in the `Program.cs` file.
@@ -1732,6 +1809,167 @@ recordsRepository.AddRecordsAsync(record);
 
 unitOfWork.SaveChangesAsync();
 ```
+
+### Using Fluent Api With Domain Objects And EF Core
+
+When working with entities in the Domain layer, we want them to represent pure business concepts and rules without being tied to technical concerns such as how the database stores or retrieves them. Persistence logic, mappings, and database-specific attributes should instead live in the Infrastructure layer, ensuring the Domain remains focused solely on business logic and remains independent from external frameworks or storage details.
+
+We need to make sure we have a private blank constructor for EF Core to use with reflection as well as making sure our properties have a private set.
+
+```C#
+namespace CleanArchitecture.Domain.Records;
+
+public class Record
+{
+    public Guid Id { get; private set; }
+    public string Title { get; private set; }
+    public string Email { get; private set; }
+    public DateTime CreatedAt { get; private set; }
+
+    private Record() { } // Required for EF Core or serialization
+
+    public Record(string title, string email)
+    {
+        Id = Guid.NewGuid();
+        CreatedAt = DateTime.UtcNow;
+
+        SetTitle(title);
+        SetEmail(email);
+    }
+
+    public void SetTitle(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ArgumentException("Title cannot be empty.", nameof(title));
+
+        Title = title.Trim();
+    }
+
+    public void SetEmail(string email)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email cannot be empty.", nameof(email));
+
+        if (!IsValidEmail(email))
+            throw new ArgumentException("Email format is invalid.", nameof(email));
+
+        Email = email.Trim();
+    }
+
+    private bool IsValidEmail(string email)
+    {
+        try
+        {
+            var addr = new System.Net.Mail.MailAddress(email);
+            return addr.Address == email;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+```
+
+Next, we can go to our `Infrastructure` layer and add a `RecordConfiguration.cs` to our persistence directory.
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using CleanArchitecture.Domain.Records;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace CleanArchitecture.Infrastructure.Records.Persistence;
+
+public class RecordConfiguration : IEntityTypeConfiguration<Record>
+{
+    public void Configure(EntityTypeBuilder<Record> builder)
+    {
+        // Sets the primary key
+        builder.HasKey(s => s.Id);
+
+        // Example of setting the Guid ourselves instead of the database handling it
+        builder.Property(s => s.Id)
+            .ValueGeneratedNever();
+
+        // If we want to rename a column in the database
+        builder.Property("Title")
+            .HasColumnName("RecordName");
+
+        // If we needed to convert a value in and out of the database, we would use
+        // HasConversion() on a complex data type. Lets pretend we have a recordType
+        // which is a Smart Enum using the package Ardalis.SmartEnum
+        builder.Property(s => s.RecordType)
+            .HasConversion(
+                recordType => recordType.Value,
+                value => RecordType.FromValue(value)
+            );
+    }
+}
+```
+
+We now need to apply this configuration when persisting the Domain object.
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using CleanArchitecture.Domain.Records;
+
+namespace CleanArchitecture.Infrastructure.Common.Persistence;
+
+public class ApplicationDbContext : DbContext
+{
+    public DbSet<Record> Records { get; set; } = null!;
+
+    public ApplicationDbContext(DbContextOptions options) : base(options)
+    {
+        //
+    }
+
+    // Lets override the OnModelCreating
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+
+        base.onModelCreating(modelBuilder);
+    }
+}
+```
+
+### Domain Driven Design
+
+In **Domain-Driven Design (DDD)**, the software is modeled around the **domain** - the problem space the business cares about.  
+For example, when a user raises an issue in an application, they'll typically say *"The record isn't updating"* rather than *"The `X` class isn't saving my update."*  
+DDD helps us structure code so it speaks the same language as the business domain.  
+
+---
+
+Domain Models
+A **Domain Model** represents concepts, rules, and behaviors from the domain. It can take different forms:  
+
+- **Anemic Domain Model**  
+  - Exposes data directly, usually through `public` properties.  
+  - Has little or no behavior - logic is pushed outside into services or other parts of the system.  
+  - Common in CRUD-style apps, but considered an anti-pattern in strict DDD since it treats objects like data bags.  
+
+- **Rich Domain Model**  
+  - Encapsulates both **data and behavior**.  
+  - Properties are typically `private` or `protected` and modified through methods.  
+  - Ensures invariants (business rules that must always be true) are enforced inside the model.  
+  - Only exposes what is necessary to the outside world.  
+
+---
+
+Validity of Domain Models
+- **Always Valid Domain Models**  
+  - The model enforces its rules so that once created, it is always in a valid state.  
+  - Example: If an `Email` value object requires a valid email format, the constructor validates it up front. Once created, you can trust it's always valid.  
+
+- **Not Always Valid Domain Models**  
+  - Models may be created in an incomplete or invalid state. External checks are required to ensure validity.  
+  - This can lead to fragile code and inconsistent states.  
+
+**Best Practice**: Strive for **Always Valid Domain Models** so your system naturally prevents invalid states and reduces the need for repetitive external validation. 
+
+
 
 ### Unit & Integration Testing
 
@@ -4669,4 +4907,6 @@ This setup provides a robust CI/CD pipeline for deploying a .NET application to 
 - AngleSharp - https://github.com/AngleSharp/AngleSharp - Provides a way of picking HTML formatted text with CSS seelctors etc.
 
 - PDFPig - https://github.com/UglyToad/PdfPig - PdfPig supports reading text and content from PDF files. It also supports basic PDF file creation.
+
+- Ardalis.SmartEnum - https://github.com/ardalis/SmartEnum
 
