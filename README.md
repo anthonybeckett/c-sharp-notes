@@ -23,6 +23,13 @@
     - [Create A Migration In Another Project Folder](#create-a-migration-in-another-project-folder)
 - [Mapping Custom Endpoints For Razor Pages](#mapping-custom-endpoints-for-razor-pages)
 - [Creating A Library For Shared Code](#creating-a-library-for-shared-code)
+- [Async & Await](#async--await)
+    - [Intro To Async Await](#intro-to-async-await)
+    - [What We Used Before](#what-we-used-before)
+    - [Parallel Programming](#parallel-programming)
+    - [Compiled Code Example](#compiled-code-example)
+    - [Creating Our Own Instance](#creating-our-own-instance)
+    - [Do's and Dont's Of Async & Await](#dos-and-donts-of-async--await)
 - [Database](#database)
     - [Setup SQLite](#setup-sqlite)
 - [Docker](#docker)
@@ -385,6 +392,611 @@ Search for library.
 Move code over and update the namespaces.
 
 Right click on the project you want to insert it into and add as a dependency to be able to import it.
+
+## Async & Await
+
+### Intro To Async Await
+
+`async` and `await` are keywords introduced in C# version 5 to simplify asynchronous programming. They let you write asynchronous code that looks like normal sequential code, instead of dealing with callbacks or complex threading. The compiler transforms it behind the scenes into a state machine that runs tasks without blocking the calling thread.
+
+An example using Async / Await
+
+```C#
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        Console.WriteLine("Fetching data...");
+
+        string data = await GetDataAsync();
+
+        Console.WriteLine("Data length: " + data.Length);
+    }
+
+    static async Task<string> GetDataAsync()
+    {
+        using var httpClient = new HttpClient();
+        return await httpClient.GetStringAsync("https://example.com");
+    }
+}
+```
+
+The await keyword makes sure the method pauses until the Task finishes, without blocking the main thread.
+
+### What We Used Before
+
+Before `async`/`await`, we often used:
+- Threads (Thread class)
+- ThreadPool (ThreadPool.QueueUserWorkItem)
+- Tasks (Task.Run)
+- Parallel.For / Parallel.ForEach (for CPU-bound work)
+
+These worked well but could get messy with callbacks or manual synchronization.
+
+Here's a simple parallel loop example:
+
+```C#
+using System;
+using System.Threading.Tasks;
+
+class Program
+{
+    static void Main()
+    {
+        Console.WriteLine("Starting parallel work...");
+
+        Parallel.For(0, 5, i =>
+        {
+            Console.WriteLine($"Task {i} running on thread {Task.CurrentId}");
+            Task.Delay(1000).Wait();
+        });
+
+        Console.WriteLine("All parallel work finished.");
+    }
+}
+```
+
+Parallel.For runs tasks concurrently, good for CPU-bound work. But it blocks threads (see Wait()), unlike async/await which frees them until the result is ready.
+
+Use async/await for I/O-bound tasks (web requests, database calls, file access).
+
+Use Parallel / Task.Run for CPU-bound tasks (math, processing, image manipulation).
+
+This is another example using nested callbacks which can get very messy.
+
+```C#
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+class Program
+{
+    static void Main()
+    {
+        Console.WriteLine("Fetching data...");
+
+        var httpClient = new HttpClient();
+
+        Task<string> task = httpClient.GetStringAsync("https://example.com");
+
+        task.ContinueWith(t =>
+        {
+            if (t.Exception == null)
+            {
+                Console.WriteLine("Data length: " + t.Result.Length);
+            }
+            else
+            {
+                Console.WriteLine("Error: " + t.Exception.Message);
+            }
+        });
+
+        Console.WriteLine("Main method continues while request runs...");
+
+        Console.ReadLine();
+    }
+}
+```
+
+### Parallel Programming
+
+`Task.WhenAll()` is handy when you want to run multiple asynchronous operations in parallel and wait for all of them to finish. If any task throws, the exception is aggregated into a single `AggregateException`. Something to keep in mind that if one object is dependent on another which is also being called in `WhenAll()` then we could run into `deadlocks`.
+
+```C#
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        var httpClient = new HttpClient();
+
+        Task<string> task1 = httpClient.GetStringAsync("https://example.com");
+        Task<string> task2 = httpClient.GetStringAsync("https://www.bing.com");
+        Task<string> task3 = httpClient.GetStringAsync("https://www.google.com");
+
+        string[] results = await Task.WhenAll(task1, task2, task3);
+
+        Console.WriteLine($"Example.com length: {results[0].Length}");
+        Console.WriteLine($"Bing.com length: {results[1].Length}");
+        Console.WriteLine($"Google.com length: {results[2].Length}");
+    }
+}
+```
+
+### Compiled Code Example
+
+This is a quick example showing how our async code is output when we compile it. A great tool for looking into this is https://sharplab.io/ 
+
+Lets take our example from the intro and see what it outputs
+
+```C#
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        Console.WriteLine("Fetching data...");
+
+        string data = await GetDataAsync();
+
+        Console.WriteLine("Data length: " + data.Length);
+    }
+
+    static async Task<string> GetDataAsync()
+    {
+        using var httpClient = new HttpClient();
+        return await httpClient.GetStringAsync("https://example.com");
+    }
+}
+```
+
+We then compile this which turns it into the Common Intermediate Language which is then taken a step further into assembly with the JIT compiler. Use the link to Sharp Lab to look further into what this outputs if you're interested.
+
+When we decompile that output back into C#, we get something like this.
+
+```C#
+using System;
+using System.Diagnostics;
+using System.Net.Http;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Security;
+using System.Security.Permissions;
+using System.Threading.Tasks;
+
+[assembly: CompilationRelaxations(8)]
+[assembly: RuntimeCompatibility(WrapNonExceptionThrows = true)]
+[assembly: Debuggable(DebuggableAttribute.DebuggingModes.IgnoreSymbolStoreSequencePoints)]
+[assembly: SecurityPermission(SecurityAction.RequestMinimum, SkipVerification = true)]
+[assembly: AssemblyVersion("0.0.0.0")]
+[module: UnverifiableCode]
+[module: RefSafetyRules(11)]
+
+[NullableContext(1)]
+[Nullable(0)]
+internal class Program
+{
+    [StructLayout(LayoutKind.Auto)]
+    [CompilerGenerated]
+    private struct <GetDataAsync>d__1 : IAsyncStateMachine
+    {
+        public int <>1__state;
+
+        [Nullable(0)]
+        public AsyncTaskMethodBuilder<string> <>t__builder;
+
+        [Nullable(0)]
+        private HttpClient <httpClient>5__2;
+
+        [Nullable(new byte[] { 0, 1 })]
+        private TaskAwaiter<string> <>u__1;
+
+        private void MoveNext()
+        {
+            int num = <>1__state;
+            string result;
+            try
+            {
+                if (num != 0)
+                {
+                    <httpClient>5__2 = new HttpClient();
+                }
+                try
+                {
+                    TaskAwaiter<string> awaiter;
+                    if (num != 0)
+                    {
+                        awaiter = <httpClient>5__2.GetStringAsync("https://example.com").GetAwaiter();
+                        if (!awaiter.IsCompleted)
+                        {
+                            num = (<>1__state = 0);
+                            <>u__1 = awaiter;
+                            <>t__builder.AwaitUnsafeOnCompleted(ref awaiter, ref this);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        awaiter = <>u__1;
+                        <>u__1 = default(TaskAwaiter<string>);
+                        num = (<>1__state = -1);
+                    }
+                    result = awaiter.GetResult();
+                }
+                finally
+                {
+                    if (num < 0 && <httpClient>5__2 != null)
+                    {
+                        ((IDisposable)<httpClient>5__2).Dispose();
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                <>1__state = -2;
+                <httpClient>5__2 = null;
+                <>t__builder.SetException(exception);
+                return;
+            }
+            <>1__state = -2;
+            <httpClient>5__2 = null;
+            <>t__builder.SetResult(result);
+        }
+
+        void IAsyncStateMachine.MoveNext()
+        {
+            //ILSpy generated this explicit interface implementation from .override directive in MoveNext
+            this.MoveNext();
+        }
+
+        [DebuggerHidden]
+        private void SetStateMachine(IAsyncStateMachine stateMachine)
+        {
+            <>t__builder.SetStateMachine(stateMachine);
+        }
+
+        void IAsyncStateMachine.SetStateMachine(IAsyncStateMachine stateMachine)
+        {
+            //ILSpy generated this explicit interface implementation from .override directive in SetStateMachine
+            this.SetStateMachine(stateMachine);
+        }
+    }
+
+
+    [StructLayout(LayoutKind.Auto)]
+    [CompilerGenerated]
+    private struct <Main>d__0 : IAsyncStateMachine
+    {
+        public int <>1__state;
+
+        public AsyncTaskMethodBuilder <>t__builder;
+
+        [Nullable(new byte[] { 0, 1 })]
+        private TaskAwaiter<string> <>u__1;
+
+        private void MoveNext()
+        {
+            int num = <>1__state;
+            try
+            {
+                TaskAwaiter<string> awaiter;
+                if (num != 0)
+                {
+                    Console.WriteLine("Fetching data...");
+                    awaiter = GetDataAsync().GetAwaiter();
+                    if (!awaiter.IsCompleted)
+                    {
+                        num = (<>1__state = 0);
+                        <>u__1 = awaiter;
+                        <>t__builder.AwaitUnsafeOnCompleted(ref awaiter, ref this);
+                        return;
+                    }
+                }
+                else
+                {
+                    awaiter = <>u__1;
+                    <>u__1 = default(TaskAwaiter<string>);
+                    num = (<>1__state = -1);
+                }
+                string result = awaiter.GetResult();
+                Console.WriteLine(string.Concat("Data length: ", result.Length.ToString()));
+            }
+            catch (Exception exception)
+            {
+                <>1__state = -2;
+                <>t__builder.SetException(exception);
+                return;
+            }
+            <>1__state = -2;
+            <>t__builder.SetResult();
+        }
+
+        void IAsyncStateMachine.MoveNext()
+        {
+            //ILSpy generated this explicit interface implementation from .override directive in MoveNext
+            this.MoveNext();
+        }
+
+        [DebuggerHidden]
+        private void SetStateMachine(IAsyncStateMachine stateMachine)
+        {
+            <>t__builder.SetStateMachine(stateMachine);
+        }
+
+        void IAsyncStateMachine.SetStateMachine(IAsyncStateMachine stateMachine)
+        {
+            //ILSpy generated this explicit interface implementation from .override directive in SetStateMachine
+            this.SetStateMachine(stateMachine);
+        }
+    }
+
+    [AsyncStateMachine(typeof(<Main>d__0))]
+    private static Task Main()
+    {
+        <Main>d__0 stateMachine = default(<Main>d__0);
+        stateMachine.<>t__builder = AsyncTaskMethodBuilder.Create();
+        stateMachine.<>1__state = -1;
+        stateMachine.<>t__builder.Start(ref stateMachine);
+        return stateMachine.<>t__builder.Task;
+    }
+
+    [AsyncStateMachine(typeof(<GetDataAsync>d__1))]
+    private static Task<string> GetDataAsync()
+    {
+        <GetDataAsync>d__1 stateMachine = default(<GetDataAsync>d__1);
+        stateMachine.<>t__builder = AsyncTaskMethodBuilder<string>.Create();
+        stateMachine.<>1__state = -1;
+        stateMachine.<>t__builder.Start(ref stateMachine);
+        return stateMachine.<>t__builder.Task;
+    }
+}
+```
+
+The main part to look into here is the `GetDataAsync()` method which is now using a state machine. 
+
+All our variables have been turned into props in the struct. The variables start with <> as it is illegal in C# code we write, but the compiler does this to further make sure it doesn't generate any naming conflicts.
+
+Next the `MoveNext()` function may look familiar if you have pushed release code but had error logs with async code which references this method. This is generated from the compiler.
+
+Inside the `MoveNext()` function, we see a try/catch block with an if/else statement inside containing the code in our initial method. In some scenarios, this can also be a switch statement with a `default` case with our code inside which is hit by the `stateMachine.<>1__state = -1;` set in our `GetDataAsync()` method.
+
+`awaiter.IsCompleted` is a check to see if we have already completed the task then we don't need to switch threads and saves on heavy CPU cycles. In more complex samples with the switch statement, it will usually be followed by a `goto` keyword which jumps to a block of code getting our result like `string result = awaiter.GetResult();`.
+
+If you are working on embedded devices, each time you use the Async keyword it adds `80 bytes` as every async method becomes a struct.
+
+### Creating Our Own Instance
+
+Just so we can get a better understanding of how Async/Await works, we will make our own version. There is no need to run something like this in a real app and is just for educational purposes. For instance, the real implementation doesn't use `locks` to avoid performance hits etc.
+
+Lets start with making our own `Task` class.
+
+```C#
+public class CustomTask
+{
+    private readonly Lock _lock = new();
+
+    private bool _completed;
+
+    private Exception? _exception;
+
+    private Action? _action;
+
+    private ExecutionContext? _context;
+
+    public static CustomTask Run(Action action)
+    {
+        CustomTask task = new();
+
+        ThreadPool.QueueUserWorkItem(_ => {
+            try 
+            {
+                action();
+
+                task.SetResult();
+            } 
+            catch(Exception e) 
+            {
+                task.SetException(e);
+            }
+        });
+
+        return task;
+    }
+
+    public static CustomTask Delay(TimeSpan delay)
+    {
+        CustomTask task = new();
+
+        new Timer(_ => task.SetResult())
+            .Change(delay, Timeout.InfiniteTimeSpan);
+
+        return task;
+    }
+
+    public CustomTask ContinueWith(Action action)
+    {
+        CustomTask task = new();
+
+        lock (_lock)
+        {
+            if (_completed) {
+                ThreadPool.QueueUserWorkItem(_ => {
+                    try 
+                    {
+                        action();
+
+                        task.SetResult();
+                    } 
+                    catch(Exception e) 
+                    {
+                        task.SetException(e);
+                    }
+                });
+            }
+            else 
+            {
+                _action = action;
+
+                _context = ExecutionContext.Capture();
+            }
+        }
+
+        return task;
+    }
+
+    // This method does block the main thread when called. Mainly here just to show 
+    // as an example
+    public void Wait()
+    {
+        ManualResetEventSlim? resetEventSlim = null;
+
+        lock (_lock)
+        {
+            if (!_completed) {
+                resetEventSlim = new();
+
+                ContinueWith(() => resetEventSlim.Set());
+            }
+        }
+
+        resetEventSlim?.Wait();
+
+        if (_exception != null) {
+            ExceptionDispatchInfo.throw(_exception);
+        }
+    }
+
+    public bool IsCompleted
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _completed;
+            }
+        }
+    }
+
+    // This is the method which gives us access to use the await keyword with our 
+    // implementation. It is called a duck type and the await keyword just looks for
+    // a method caled GetAwaiter(). We also do need to implement the INotifyCompletion
+    // interface on the type returned from this method. In this instance, a struct under
+    // this class
+    public CustomTaskAwaiter GetAwaiter() => new(this);
+
+    public void SetResult() => CompleteTask(null);
+
+    public void SetException(Exception exception) => CompleteTask(exception);
+
+    private void CompleteTask(Exception? exception)
+    {
+        lock(_lock)
+        {
+            if (_completed) {
+                throw new InvalidOperationException("Task already completed");
+            }
+
+            _completed = true;
+
+            _exception = exception;
+
+            if (_action != null) {
+                if (_context == null) {
+                    _action.Invoke();
+                } else {
+                    ExecutionContext.Run(_context, state => ((Action?)state)?.Invoke(), _action);
+                }
+            }
+        }
+    }
+}
+
+public readonly struct CustomTaskAwaiter : INotifyCompletion
+{
+    private readonly CustomTask _task;
+
+    internal CustomTaskAwaiter(CustomTask task) => _task = task;
+
+    public bool IsCompleted => _task.IsCompleted;
+
+    public void OnCompleted(Action continuation) => _task.ContinueWith(continuation);
+
+    public CustomTaskAwaiter GetAwait() => this;
+
+    public void GetResult() => _task.Wait();
+}
+```
+
+We can now run this like the usual await style instance doing something like this
+
+```C#
+await CustomTask.Run(() => Console.WriteLine($"Current thread id: {Environment.CurrentManagedThreadId}"));
+```
+
+### Do's and Dont's Of Async & Await
+
+--- 
+#### Async Void
+
+Normally, an async method should return either:
+
+`Task` if it has no result.
+
+`Task<T>` if it produces a result.
+
+But you can mark a method as async void. The problem is:
+- No way to await it
+- Exceptions are uncatchable
+- Fire-and-forget behavior
+- Can cause race conditions
+
+```C#
+// Bad: async void (cannot await, exceptions unhandled)
+async void DoWork()
+{
+    await Task.Delay(1000);
+    throw new Exception("Oops!");
+}
+
+// Good: async Task
+async Task DoWorkAsync()
+{
+    await Task.Delay(1000);
+    throw new Exception("Oops!");
+}
+```
+
+We can also use the `AsyncAwaitBestPractices` library and call a `SafeFireAndForget()` if we know we want this kind of behaviour of just letting it run in the background, but can still catch exceptions.
+
+--- 
+#### Cancellation Tokens
+
+When creating async functions, we should always give the option of passing in a `CancellationToken`.
+
+If you come across an async method without a `CancellationToken` param, we can append the `WaitAsync(token)`.
+
+```C#
+// Even though the second argument in the delay method supports a cancellation token
+// we are just doing this to show as an example.
+Task.Delay(TimeSpan.FromSeconds(2)).WaitAsync(token);
+```
+---  
+#### Wait And Result
+
+The `.Wait()` and `.Result()` methods should always be avoided when it comes to async programming as they are thread blocking calls. Just use `await` instead.
+
+--- 
 
 ## Database
 
