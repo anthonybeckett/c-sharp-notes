@@ -782,6 +782,9 @@ Just so we can get a better understanding of how Async/Await works, we will make
 Lets start with making our own `Task` class.
 
 ```C#
+using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
+
 public class CustomTask
 {
     private readonly Lock _lock = new();
