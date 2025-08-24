@@ -30,6 +30,7 @@
     - [Compiled Code Example](#compiled-code-example)
     - [Creating Our Own Instance](#creating-our-own-instance)
     - [Do's and Dont's Of Async & Await](#dos-and-donts-of-async--await)
+    - [IAsyncEnumerable](#iasyncenumerable)
 - [Database](#database)
     - [Setup SQLite](#setup-sqlite)
 - [Docker](#docker)
@@ -997,9 +998,93 @@ Task.Delay(TimeSpan.FromSeconds(2)).WaitAsync(token);
 ---  
 #### Wait And Result
 
-The `.Wait()` and `.Result()` methods should always be avoided when it comes to async programming as they are thread blocking calls. Just use `await` instead.
+The `.Wait()` and `.Result` methods should always be avoided when it comes to async programming as they are thread blocking calls. Just use `await` instead.
 
 --- 
+#### Avoid Return Await
+
+If you have any functions which use `return await`, you can remove the await keyword and pass the task back up the stack. There are some exceptions with this.
+- When your await is inside a try/catch block
+- When you're inside a `using` block of code
+
+--- 
+#### Utilize ConfigureAwait(false)
+
+Use `.ConfigureAwait(false)` when using C# apps with a SynchronizationContext (e.g A UI Layer). These can include
+- WPF
+- Winforms
+- Xamarin
+- .NET MAUI
+- WinUI
+- Blazor
+
+This is not useful for `ASP.NET Core` and can be avoided.
+
+### IAsyncEnumerable
+
+`IAsyncEnumerable<T>` is the asynchronous version of `IEnumerable<T>`. Instead of pulling items synchronously (foreach), you can pull them asynchronously using `await foreach`. This is useful when you want to stream results gradually (e.g., database rows, API responses, file lines), without waiting for all data to be ready.
+
+An example streaming lines in a file:
+
+```C#
+static async IAsyncEnumerable<string> ReadLinesAsync(string filePath)
+{
+    using var reader = new StreamReader(filePath);
+    while (!reader.EndOfStream)
+    {
+        string line = await reader.ReadLineAsync();
+        yield return line;
+    }
+}
+
+static async Task Main()
+{
+    await foreach (var line in ReadLinesAsync("data.txt"))
+    {
+        Console.WriteLine(line);
+    }
+}
+```
+
+`Task.WhenEach()` is a newer API that works hand-in-hand with `IAsyncEnumerable<Task<T>>`. Where `Task.WhenAll` waits for all tasks to complete before giving you results,
+`Task.WhenEach` gives you results as soon as each task finishes, in completion order.
+
+```C#
+using System;
+using System.Linq;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        var httpClient = new HttpClient();
+
+        var urls = new[]
+        {
+            "https://example.com",
+            "https://www.microsoft.com",
+            "https://www.github.com"
+        };
+
+        var tasks = urls.Select(url => httpClient.GetStringAsync(url));
+
+        await foreach (var completed in Task.WhenEach(tasks))
+        {
+            try
+            {
+                string result = await completed;
+                Console.WriteLine($"Downloaded {result.Length} characters");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+            }
+        }
+    }
+}
+```
 
 ## Database
 
