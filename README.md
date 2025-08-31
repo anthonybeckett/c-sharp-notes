@@ -11,9 +11,10 @@
     - [Initial Config](#initial-config) 
     - [Setting Up Environment Variables Linux](#setting-up-environment-variables-linux)
     - [Accessing Environment Variables](#accessing-environment-variables)
-    - [Azure Key Vault On Ubuntu]()
+    - [Azure Key Vault On Ubuntu](#azure-key-vault-on-ubuntu)
 - [C# Topics](#c-topics)
     - [Extension Methods](#extension-methods)
+    - [IHttpContextAccessor](#ihttpcontextaccessor)
 - [Dotnet CLI Tips And References](#dotnet-cli-tips-and-references)
     - [Create A New Solution](#create-a-new-solution) 
     - [Add New Web API Project](#add-new-web-api-project)
@@ -59,6 +60,12 @@
     - [Domain Driven Design](#domain-driven-design)
     - [Unit & Integration Testing](#unit--integration-testing) 
     - [Overriding Validation Filter Attribute](#overriding-validation-filter-attribute)
+    - [Validation](#validation)
+    - [Validation & MediatR Pipelines](#validation--mediatr-pipelines)
+    - [Validation & MediatR Pipelines Using Generic Behaviours](#validation--mediatr-pipelines-using-generic-behaviours)
+    - [Domain Events](#domain-events)
+    - [Transactional & Eventual Consistency](#transactional--eventual-consistency)
+    - [Authentication & Authorization](#authentication--authorization)
 - [API](#api)
     - [Setup Authentication With Identity](#setup-authentication-with-identity)
     - [Setup Authentication With Identity For Older Versions](#setup-authentication-with-identity-for-older-versions)
@@ -96,7 +103,17 @@
     - [Using Thread Channels To Send Emails In The Background](#using-thread-channels-to-send-emails-in-the-background)
     - [Example Of Keeping The SMTP Client Alive For Multiple Messages](#example-of-keeping-the-smtp-client-alive-for-multiple-messages)
 - [Dotnet MAUI](#dotnet-maui)
+    - [Installing Dotnet MAUI](#installing-dotnet-maui)
+    - [Setting Up A Maui Project](#setting-up-a-maui-project) 
     - [Community ToolKit](#community-toolkit)
+    - [MauiProgram.cs](#mauiprogramcs)
+    - [Creating A Content Page](#creating-a-content-page)
+    - [Layouts](#layouts)
+    - [BaseContentPage & Global Page Config](#basecontentpage--global-page-config)
+    - [Margin & Padding](#margin--padding)
+    - [XAML](#xaml)
+    - [Collection Views](#collection-views)
+    - [Refresh Views](#refresh-views)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
 - [Unit testing](#unit-testing)
     - [Libraries](#libraries)
@@ -318,6 +335,40 @@ public static class StringExtensions
     }
 }
 ```
+
+### IHttpContextAccessor
+
+`IHttpContextAccessor` is a service provided by ASP.NET Core that allows you to access the current `HttpContext` (the object representing the incoming HTTP request and response) from places where HttpContext is not normally available like services, background tasks, or classes outside of controllers/middleware.
+
+Normally, you can only access `HttpContext` inside controllers or middleware because it's tied to the current request.
+
+With `IHttpContextAccessor`, you can inject it into a class and get the `HttpContext` from its .HttpContext property.
+
+To enable this, register it in `Program.cs`
+
+```C#
+builder.Services.AddHttpContextAccessor();
+```
+
+Then use it by injecting it into your class and grabbing the HttpContext
+
+```C#
+public class CurrentUserService
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public CurrentUserService(IHttpContextAccessor httpContextAccessor)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
+
+    public string? GetCurrentUserId()
+    {
+        return _httpContextAccessor.HttpContext?.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+    }
+}
+```
+
 
 ## Dotnet CLI Tips And References
 
@@ -2924,6 +2975,685 @@ public class ValidationFilterAttribute : ActionFilterAttribute
 }
 ```
 
+### Validation
+
+There are two types of validation. 
+
+First is `Model Validation` which can sit in the presentation layer or beginning of the Application layer. This is normally validating user input against certain criteria before we process it. A good preference when using this type of validation is fail early so we are not using more CPU cycles than needed going through the application for it to fail at a later stage. We may also end up with the same validation appearing twice when it hits the business logic later on but this is ok.
+
+A good library to use is `Fluent Validation` which is a validation Library for .NET that uses a fluent interface and lambda extresssions for building strongly-typed validation rules.
+
+The library and examples can be found here: https://github.com/FluentValidation/FluentValidation
+
+```bash
+dotnet add package FluentValidation
+```
+
+```C#
+using FluentValidation;
+
+public class CustomerValidator: AbstractValidator<Customer> {
+  public CustomerValidator() {
+    RuleFor(x => x.Surname).NotEmpty();
+    RuleFor(x => x.Forename).NotEmpty().WithMessage("Please specify a first name");
+    RuleFor(x => x.Discount).NotEqual(0).When(x => x.HasDiscount);
+    RuleFor(x => x.Address).Length(20, 250);
+    RuleFor(x => x.Postcode).Must(BeAValidPostcode).WithMessage("Please specify a valid postcode");
+  }
+
+  private bool BeAValidPostcode(string postcode) {
+    // custom postcode validating logic goes here
+  }
+}
+
+// Example of handling the validation
+var customer = new Customer();
+var validator = new CustomerValidator();
+
+// Execute the validator
+ValidationResult results = await validator.ValidateAsync(customer);
+
+// Inspect any validation failures.
+bool success = results.IsValid;
+List<ValidationFailure> failures = results.Errors;
+
+// In our Command/Query Handler we can return something like this
+if (!results.IsValid) {
+    return results.Errors
+        .Select(error => Error.Validation(code: error.PropertyName, description: error.ErrorMessage))
+        .ToList();
+} 
+```
+
+There is also `Domain Layer Validation Rules`. An example of this from what we have been working with could be a Record cannot contain the same email as an existing record.
+
+```C#
+// The Command in the Application layer
+public record CreateRecordCommand(string Email) : IRequest<Guid>;
+
+
+// The Command Handler also in the Application layer
+public class CreateRecordCommandHandler : IRequestHandler<CreateRecordCommand, Guid>
+{
+    private readonly IRecordUniquenessChecker _uniquenessChecker;
+    private readonly IRecordRepository _recordRepository;
+
+    public CreateRecordCommandHandler(
+        IRecordUniquenessChecker uniquenessChecker,
+        IRecordRepository recordRepository)
+    {
+        _uniquenessChecker = uniquenessChecker;
+        _recordRepository = recordRepository;
+    }
+
+    public async Task<Guid> Handle(CreateRecordCommand request, CancellationToken cancellationToken)
+    {
+        // Business rule: Email must be unique
+        if (!await _uniquenessChecker.IsEmailUniqueAsync(request.Email))
+            throw new InvalidOperationException("A record with this email already exists.");
+
+        var record = new Record(request.Email);
+
+        await _recordRepository.AddAsync(record);
+
+        return record.Id;
+    }
+}
+
+// The Entity in the Domain layer
+public class Record
+{
+    public Guid Id { get; private set; }
+    public string Email { get; private set; }
+
+    private Record() { } // For EF Core
+
+    public Record(string email)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email cannot be empty.", nameof(email));
+
+        Email = email;
+        Id = Guid.NewGuid();
+    }
+}
+
+
+// The Domain Service Interface
+public interface IRecordUniquenessChecker
+{
+    Task<bool> IsEmailUniqueAsync(string email);
+}
+
+// Implementing logic from the database (infrastrcutre layer)
+public class RecordRepository : IRecordRepository
+{
+    private readonly AppDbContext _db;
+
+    public RecordRepository(AppDbContext db)
+    {
+        _db = db;
+    }
+
+    public async Task AddAsync(Record record)
+    {
+        _db.Records.Add(record);
+        await _db.SaveChangesAsync();
+    }
+}
+
+public class RecordUniquenessChecker : IRecordUniquenessChecker
+{
+    private readonly AppDbContext _db;
+
+    public RecordUniquenessChecker(AppDbContext db)
+    {
+        _db = db;
+    }
+
+    public async Task<bool> IsEmailUniqueAsync(string email)
+    {
+        return !await _db.Records.AnyAsync(r => r.Email == email);
+    }
+}
+```
+
+### Validation & MediatR Pipelines
+
+The normal structure when validating using `Fluent Assertions` is placing your validator in your Command or Query folder relevant to the request and then adding a check at the beginning of the Command or Query Handler.
+
+Having it at the beginning of the Command/Query Handler can look a bit messy and break the Single Responsibility Principle. If we are using `Mediatr` we can move this logic into a `Pipeline`. 
+
+First we can add a file like `CreateRecordCommandBehaviour.cs`.
+
+```C#
+using MediatR;
+using ErrorOr;
+
+namespace CleanArchitecture.Application.Records.Commands.CreateRecordCommandBehaviour;
+
+public class CreateRecordCommandBehaviour : IPipelineBehaviour<CreateRecordCommand, ErrorOr<Record>>
+{
+    public async Task<ErrorOr<Record>> Handle(CreateRecordCommand request, RequestHandlerDelegate<ErrorOr<Record>> next, CancellationToken cancellationToken)
+    {
+        ValidationResult results = await validator.ValidateAsync(request);
+
+        bool success = results.IsValid;
+
+        if (!results.IsValid) {
+            return results.Errors
+                .Select(error => Error.Validation(code: error.PropertyName, description: error.ErrorMessage))
+                .ToList();
+        } 
+
+        return await next();
+    }
+}
+```
+
+We then register this in our `DepencyInjection.cs` file in our `Application` layer. 
+
+```C#
+using CleanArchitecture.Application.Services;
+using Microsoft.Extensions.DepencyInjection;
+
+namespace CleanArchitecture.Application;
+
+public static class DependencyInjection
+{
+    public static IServicesCollection AddApplication(this IServicesCollection services)
+    {
+        services.AddScoped<IRecordService, RecordService>();
+
+        // Add this to implement our pipeline as Middleware 
+        services.AddBehaviour<IPipelineBehaviour<CreateRecordCommand, ErrorOr<Record>>, CreateRecordCommandBehaviour>();
+
+        return services;
+    }
+}
+```
+
+### Validation & MediatR Pipelines Using Generic Behaviours
+
+In the last section, we implemented a `MediatR pipeline` to handle our validation. The problem with that approach is everytime a developer on your team wants to add a new feature, they have to add a file for our Command/Query, the Handler, the Validator and the Behaviour.
+
+We can make this easier by implementing a Open Generic Pipeline Behaviour.
+
+First we will next to add another package to our Application layer.
+
+```bash
+dotnet add src/CleanArchitecture.Application package FluentValidation.AspNetCore
+```
+
+We can get started by adding a new folder in our `Common` directory called `Behaviours` and create a file called `ValidationBehaviour.cs`.
+
+```C#
+using MediatR;
+using ErrorOr;
+
+namespace CleanArchitecture.application.Common.Behaviours;
+
+public class ValidationBehaviour<TRequest, TResponse> : IPipelineBehaviour<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>
+    where TResponse : IErrorOr
+{
+    private readonly IValidator<TRequest>? _validator;
+
+    public ValidationBehaviour(IValidator<TRequest>? validator = null)
+    {
+        _validator = validator;
+    }
+
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken token)
+    {
+        if (_validator == null) {
+            return await next();
+        }
+
+        var validationResult = await _validator.ValidateAync(request, token);
+
+        if (validationResult.IsValid) {
+            return await next();
+        }
+
+        var errors = validationResult.Errors
+            .ConvertAll(error => Error.Validation(code: error.PropertyName, description: error.ErrorMessage));
+
+        return (dynamic)errors;
+    }
+}
+```
+
+In our `DepencyInjection.cs`, we can now add this
+
+```C#
+using CleanArchitecture.Application.Services;
+using Microsoft.Extensions.DepencyInjection;
+
+namespace CleanArchitecture.Application;
+
+public static class DependencyInjection
+{
+    public static IServicesCollection AddApplication(this IServicesCollection services)
+    {
+        services.AddMediatR(options => {
+            options.RegisterServicesFromAssemblyContaining(typeof(DependencyInjection));
+
+            options.AddOpenBehaviour(typeof(ValidationBehaviour<,>));
+        })
+
+        services.AddValidatorsFromAssemblyContaining(typeof(DependencyInjection));
+
+        return services;
+    }
+}
+```
+
+### Domain Events
+
+A `domain event` is something interesting, from a business point of view, that happened within the system.
+
+For this example, we will need to add the `MediatR` package to the Domain layer
+
+```bash
+dotnet add src/CleanArchitecture.Domain package MediatR
+```
+
+```C#
+// First lets make an interface in a Common directory in the Domain layer
+public interface IDomainEvent : INotification;
+
+// We’ll make a simple event that fires when a Record is created. We place these in the domain layer within an events folder.
+public class RecordCreatedEvent : IDomainEvent
+{
+    public Guid RecordId { get; }
+    public string Email { get; }
+
+    public RecordCreatedEvent(Guid recordId, string email)
+    {
+        RecordId = recordId;
+        Email = email;
+    }
+}
+
+// Now we want to make a base class for our Domain Events. This can also live in the Common folder we just created. We can call it something like Entity.cs
+public abstract class Entity
+{
+    public Guid Id { get; init; }
+
+    protected readonly List<IDomainEvent> _domainEvents = [];
+
+    protected IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
+
+    protected Entity(Guid id) => Id = id;
+
+    protected Entity() {}
+
+    private void AddDomainEvent(IDomainEvent domainEvent)
+    {
+        _domainEvents.Add(domainEvent);
+    }
+
+    public void ClearDomainEvents() => _domainEvents.Clear();
+}
+
+// Next we add an internal collection of events to the relevant entity
+public class Record : Entity
+{
+    public string Email { get; private set; }
+
+    private Record() { } // EF Core
+
+    public Record(Guid userId, string email) : base(userId ?? Guid.NewGuid())
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email cannot be empty.", nameof(email));
+
+        Email = email;
+
+        AddDomainEvent(new RecordCreatedEvent(Id, Email));
+    }
+}
+
+// After saving a Record, the application layer (command handler or repository decorator) is responsible for publishing domain events.
+public class CreateRecordCommandHandler : IRequestHandler<CreateRecordCommand, Guid>
+{
+    private readonly IRecordRepository _recordRepository;
+    private readonly IRecordUniquenessChecker _uniquenessChecker;
+    private readonly IMediator _mediator;
+
+    public CreateRecordCommandHandler(
+        IRecordRepository recordRepository,
+        IRecordUniquenessChecker uniquenessChecker,
+        IMediator mediator)
+    {
+        _recordRepository = recordRepository;
+        _uniquenessChecker = uniquenessChecker;
+        _mediator = mediator;
+    }
+
+    public async Task<Guid> Handle(CreateRecordCommand request, CancellationToken cancellationToken)
+    {
+        if (!await _uniquenessChecker.IsEmailUniqueAsync(request.Email))
+            throw new InvalidOperationException("A record with this email already exists.");
+
+        var record = new Record(request.Email);
+
+        await _recordRepository.AddAsync(record);
+
+        // Publish domain events
+        foreach (var domainEvent in record.DomainEvents)
+        {
+            await _mediator.Publish(domainEvent, cancellationToken);
+        }
+
+        record.ClearDomainEvents();
+
+        return record.Id;
+    }
+}
+
+// Handlers live in the Application Layer (or Infrastructure if they’re purely technical).
+public class RecordCreatedEventHandler : INotificationHandler<RecordCreatedEvent>
+{
+    public async Task Handle(RecordCreatedEvent notification, CancellationToken cancellationToken)
+    {
+        // Example: Send welcome email, log audit trail, etc.
+        Console.WriteLine($"New record created: {notification.Email}");
+
+        return Task.CompletedTask;
+    }
+}
+```
+
+### Transactional & Eventual Consistency
+
+`Transactional Consistency` is when all operations within a unit of work (usually a database transaction) succeed or fail together. The system state is always consistent immediately after the transaction commits.
+
+For example: When creating a Record, you also create a related UserProfile in the same transaction. If saving the UserProfile fails, the whole transaction rolls back, leaving no half-complete data.
+
+Pros:
+- Low congitive load
+- Simplicity
+
+Cons:
+- Decreased performance
+- Limited error handling
+- Decreased scalability
+
+`Eventual Consistency` is when changes are applied in one place first, then propagated to others asynchronously (via events or messaging). The system will become consistent over time, but not immediately. 
+
+For example: RecordCreatedEvent is raised when a Record is saved. A handler later sends a "welcome email" or updates a reporting database. There may be a short delay where the Record exists but the email hasn't been sent yet.
+
+Pros:
+- High performance
+- Flexible error handling
+- Scalability
+- Compose different side effects
+
+Cons:
+- High congitive load
+- Complexity
+
+An example of using Eventual Consistency looks something like this:
+
+```C#
+// In our Entity class, see above for the Entity base class version
+public class Record
+{
+    public Guid Id { get; private set; }
+    public string Email { get; private set; }
+
+    private readonly List<IDomainEvent> _domainEvents = new();
+    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
+
+    private Record() { }
+
+    public Record(string email)
+    {
+        Id = Guid.NewGuid();
+        Email = email;
+
+        AddDomainEvent(new RecordCreatedEvent(Id, Email));
+    }
+
+    private void AddDomainEvent(IDomainEvent domainEvent) => _domainEvents.Add(domainEvent);
+
+    public void ClearDomainEvents() => _domainEvents.Clear();
+}
+
+// Now create a middleware to process the Queue
+public class DomainEventsMiddleware
+{
+    private readonly RequestDelegate _next;
+    private static readonly Queue<IDomainEvent> _eventQueue = new();
+
+    public DomainEventsMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+
+    public async Task InvokeAsync(HttpContext context, AppDbContext dbContext)
+    {
+        // Before request
+        await _next(context);
+
+        // After transaction completes successfully
+        var entitiesWithEvents = dbContext.ChangeTracker
+            .Entries<Record>()
+            .Select(e => e.Entity)
+            .Where(e => e.DomainEvents.Any())
+            .ToList();
+
+        foreach (var entity in entitiesWithEvents)
+        {
+            foreach (var domainEvent in entity.DomainEvents)
+            {
+                _eventQueue.Enqueue(domainEvent);
+            }
+
+            entity.ClearDomainEvents();
+        }
+
+        // Process events asynchronously (simulated eventual consistency)
+        while (_eventQueue.Count > 0)
+        {
+            var domainEvent = _eventQueue.Dequeue();
+            await HandleEventAsync(domainEvent);
+        }
+    }
+
+    private Task HandleEventAsync(IDomainEvent domainEvent)
+    {
+        switch (domainEvent)
+        {
+            case RecordCreatedEvent e:
+                Console.WriteLine($"[EVENT HANDLER] Record created: {e.RecordId}, {e.Email}");
+                // e.g. send email, publish to external service, etc.
+                break;
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+// Register this middleware in Program.cs
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddDbContext<AppDbContext>();
+var app = builder.Build();
+
+app.UseMiddleware<DomainEventsMiddleware>();
+app.MapControllers();
+
+app.Run();
+
+// We can also add this to our infrastructure layer like this
+public static class RequestPipeline
+{
+    public static IApplicationBuilder AddInfrastructureMiddleware(this IApplicationBuilder builder)
+    {
+        builder.UseMiddleware<DomainEventsMiddleware>();
+
+        return builder;
+    }
+}
+
+// We then just add this to Program.cs instead
+app.AddInfrastructureMiddleware();
+```
+
+With the in-memory approach, if our application restarts, we lose any outstanding events because they only exist in memory. For a more consistent and reliable solution, we should persist events and use a message broker or durable queue (like RabbitMQ, Redis Streams, or Apache Kafka) so that events survive crashes and can be processed reliably. This is known as the `Outbox Pattern + Message Broker` strategy.
+
+### Authentication & Authorization
+
+Authentication and Authorization in a Clean Architecture app require some careful separation of concerns, because they cut across multiple layers.
+
+Authentication is typically handled at the API / Infrastructure boundary (before entering your Application layer).
+
+Example: ASP.NET Core Middleware validates a JWT and extracts claims. The result (e.g. UserId, Roles) is passed into the Application Layer via an abstraction (e.g. ICurrentUserService).
+
+Authorization is typically business rules about what users can do belong in the Domain or Application layer.
+
+Example: "Only the owner of a Record can delete it" is a Domain rule or "Only Admins can create new Records" is an Application rule.
+
+An example of implementation:
+
+```C#
+// In the domain layer, create an IdentityUser
+public class ApplicationUser : IdentityUser<Guid>
+{
+    // Add any custom props here
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+}
+
+// In the infrastructure layer, add the IdentityDbContext to our DbContext
+public class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Guid>, Guid>
+{
+    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void OnModelCreating(ModelBuilder builder)
+    {
+        base.OnModelCreating(builder);
+        // You can add seeding or model customization here
+    }
+}
+
+// Add something like this to our Program.cs or abstract it into our infrastructure layer
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+builder.Services.AddDefaultIdentity<ApplicationUser>(options =>
+    {
+        options.SignIn.RequireConfirmedAccount = true;
+        // Additional Identity options...
+    })
+    .AddRoles<IdentityRole<Guid>>()  // if role support needed
+    .AddEntityFrameworkStores<ApplicationDbContext>();
+```
+
+If we want to seed a Admin and User role, we can modify the `OnModelCreating`
+
+```C#
+protected override void OnModelCreating(ModelBuilder builder)
+{
+    base.OnModelCreating(builder);
+
+    var adminId = Guid.NewGuid();
+    var roleId = Guid.NewGuid();
+    var hasher = new PasswordHasher<ApplicationUser>();
+
+    var adminUser = new ApplicationUser
+    {
+        Id = adminId,
+        UserName = "admin",
+        NormalizedUserName = "ADMIN",
+        Email = "admin@example.com",
+        NormalizedEmail = "ADMIN@EXAMPLE.COM",
+        EmailConfirmed = true,
+        SecurityStamp = Guid.NewGuid().ToString(),
+        FirstName = "Super",
+        LastName = "Admin"
+    };
+    adminUser.PasswordHash = hasher.HashPassword(adminUser, "Admin@123");
+
+    var adminRole = new IdentityRole<Guid>
+    {
+        Id = roleId,
+        Name = "Admin",
+        NormalizedName = "ADMIN"
+    };
+
+    builder.Entity<ApplicationUser>().HasData(adminUser);
+    builder.Entity<IdentityRole<Guid>>().HasData(adminRole);
+    builder.Entity<IdentityUserRole<Guid>>().HasData(new IdentityUserRole<Guid>
+    {
+        RoleId = roleId,
+        UserId = adminId
+    });
+}
+```
+
+Implement ICurrentUserService to abstract identity details into Application layer:
+
+```C#
+public interface ICurrentUserService
+{
+    Guid? UserId { get; }
+    bool IsInRole(string role);
+}
+```
+
+and add the logic to the Infrastructure layer
+
+```C#
+public class CurrentUserService : ICurrentUserService
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public CurrentUserService(IHttpContextAccessor httpContextAccessor)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
+
+    public Guid? UserId =>
+        Guid.TryParse(_httpContextAccessor.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier), out var id)
+            ? id
+            : (Guid?)null;
+
+    public bool IsInRole(string role) =>
+        _httpContextAccessor.HttpContext?.User.IsInRole(role) ?? false;
+}
+```
+
+Add this to the DepencyInjection in the Application layer.
+
+Finally we need to add some setup for the Authentication endpoints to register
+In `Program.cs`, add the following
+
+```C#
+// Authorization
+builder.Services.AddAuthorization();
+
+// Configure identity database access via EF Core. Something like this should already 
+// exist but make sure the Context here is the one we extended earlier
+builder.Services.AddDbContext<ApplicationDbContext>(
+    options => options.UseInMemoryDatabase("AppDb")
+);
+
+// Activate identity APIs. By default, both cookies and proprietary tokens
+// are activated. Cookies will be issued based on the `useCookies` querystring
+// parameter in the login endpoint.
+builder.Services.AddIdentityApiEndpoints<IdentityUser>()
+    .AddEntityFrameworkStores<ApplicationDbContext>();
+
+// Built-in endpoints like /register, /login, /me
+app.MapIdentityApi<IdentityUser>();
+```
+
 ## API
 
 ### Setup Authentication With Identity
@@ -5020,15 +5750,747 @@ public class SmtpMailSender(
 
 ## Dotnet MAUI
 
+### Installing Dotnet MAUI
+
+First we need to make sure we have the .NET SDK installed.
+
+For MacOS:
+
+We need to make sure we have XCode installed. This can be downloaded in the App Store.
+
+```bash
+sudo dotnet workload install maui
+```
+
+For Windows:
+
+We will need to download Visual Studio. On the workloads screen in the installer, we need to add the .NET MAUI option.
+
+If we use VS Code to develop, there is a .NET MAUI extension that can be downloaded from the extensions tab.
+
+### Setting Up A Maui Project
+
+In our IDE, we want to create a new MAUI solution. This is similar to creating any other solution where we give it a Solution Name, Project name and where we want to keep this project.
+
 ### Community ToolKit
 
 The community toolkit is a dotnet MAUI add on for extra features which can be dropped into your application to help build certain parts of your application faster.
 
-It can be downloaded as a NuGet package.
-
 More information can be found here.
 
 https://learn.microsoft.com/en-gb/dotnet/communitytoolkit/maui/
+
+Some of the most common ones which can be installed on NuGet through your IDE or the command line with the `dotnet package add` command
+
+- communitytoolkit.maui
+- communitytoolkit.mvvm
+- communitytoolkit.maui.markup
+
+We can now add these in our `MauiProgram.cs`
+
+```C#
+// Add these into our builder
+builder
+    .UseMauiCommunityToolkit()
+    .UseMauiCommunityToolkitMarkup()
+```
+
+### MauiProgram.cs
+
+This file is the entry point to our Application. it is Similar to `Program.cs` in a .NET Core application. It handles setup of libraries, dependency injection and other bits.
+
+This line tells MAUI where to launch our Application from
+
+```C#
+builder.UseMauiApp<App>()
+```
+
+The App inside the generic points at our `App.xaml.cs` file. Inside this file, we see this line
+
+```C#
+MainPage = new AppShell();
+```
+
+If we want to change this, we can delete the old page and create a new file like `MainPage.cs` and will look like this
+
+```C#
+namespace HelloMaui;
+
+public class MainPage : ContentPage
+{
+
+}
+```
+
+### Creating A Content Page
+
+For this example, we will use our `MainPage.cs` file from the last section and add some text.
+
+```C#
+namespace HelloMaui;
+
+public class MainPage : ContentPage
+{
+    public MainPage()
+    {
+        Content = new Label()
+            .Text("This is a label")
+            .Center()
+            .TextCenter();
+    }
+}
+```
+
+This should now show some text in the center of the screen.
+
+### Layouts
+
+In .NET MAUI, layouts are containers that organize child controls (buttons, labels, etc.) on the screen. They define how elements are positioned and sized.
+
+Main Layouts:
+
+`StackLayout`:
+
+- Arranges elements vertically (default) or horizontally.
+- Good for simple forms and lists.
+
+```C#
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="HelloMaui.MainPage">
+
+    <VerticalStackLayout Spacing="12">
+
+        <Image Source="appicon"
+               WidthRequest="500"
+               HeightRequest="250"
+               Aspect="AspectFit" />
+
+        <Label Text="Hello"
+               TextColor="Black"
+               HorizontalOptions="Center"
+               HorizontalTextAlignment="Center" />
+
+        <!-- Entry is a textarea where a user can input text -->
+        <Entry Placeholder="Notes"
+               PlaceholderColor="DarkGray"
+               TextColor="Black" />
+
+        <!-- Nested layout -->
+        <HorizontalStackLayout Spacing="12"
+                               HorizontalOptions="Center">
+
+            <Entry Placeholder="First"
+                   PlaceholderColor="DarkGray"
+                   TextColor="Black" />
+
+            <Entry Placeholder="Second"
+                   PlaceholderColor="DarkGray"
+                   TextColor="Black" />
+        </HorizontalStackLayout>
+
+    </VerticalStackLayout>
+</ContentPage>
+```  
+
+```C#
+using CommunityToolkit.Maui.Markup;
+
+namespace HelloMaui;
+
+public class MainPage : ContentPage
+{
+    public MainPage()
+    {
+        Content = new VerticalStackLayout()
+        {
+            Spacing = 12,
+
+            Children = 
+            {
+                new Image()
+                    .Size(500, 250)
+                    .Aspect(Aspect.AspectFit)
+                    .Source("appicon"),
+
+                new Label()
+                    .Text("Hello", Colors.Black)
+                    .Center()
+                    .TextCenter(),
+
+                // Entry is a textarea where a user can input text
+                new Entry()
+                    .Placeholder("Notes", Colors.DarkGray)
+                    .TextColor(Colors.Black)
+
+                // We can also nest layouts 
+                new HorizontalStackLayout()
+                {
+                    Spacing = 12,
+
+                    Children =
+                    {
+                        new Entry()
+                            .Placeholder("First", Colors.DarkGray)
+                            .TextColor(Colors.Black)
+
+                        new Entry()
+                            .Placeholder("Second", Colors.DarkGray)
+                            .TextColor(Colors.Black)
+                    }
+                }.Center();
+            }
+        };
+    }
+}
+```
+
+`Grid`:
+
+- Organizes content in rows and columns (like an HTML table).
+- Most powerful layout for complex UIs.
+
+```C#
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="HelloMaui.MainPage"
+             BackgroundColor="DarkViolet">
+
+    <ScrollView>
+        <Grid BackgroundColor="LightSteelBlue"
+              RowSpacing="12"
+              HorizontalOptions="Center"
+              VerticalOptions="Start">
+
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="32" />
+                <RowDefinition Height="40" />
+                <RowDefinition Height="500" />
+            </Grid.RowDefinitions>
+
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Image Source="dotnet_bot.png"
+                   Aspect="AspectFit"
+                   WidthRequest="500"
+                   HeightRequest="250"
+                   HorizontalOptions="Center"
+                   VerticalOptions="Center"
+                   Grid.Row="0"
+                   Grid.ColumnSpan="3" />
+
+            <Label Text="Hello MAUI"
+                   TextColor="Black"
+                   HorizontalOptions="Center"
+                   HorizontalTextAlignment="Center"
+                   Grid.Row="1"
+                   Grid.ColumnSpan="3" />
+
+            <Entry Placeholder="First Entry"
+                   PlaceholderColor="DarkGray"
+                   TextColor="Black"
+                   HorizontalOptions="End"
+                   Grid.Row="2"
+                   Grid.Column="0" />
+
+            <Entry Placeholder="Second Entry"
+                   PlaceholderColor="DarkGray"
+                   TextColor="Black"
+                   HorizontalOptions="Center"
+                   Grid.Row="2"
+                   Grid.Column="1" />
+
+            <Entry Placeholder="Third Entry"
+                   PlaceholderColor="DarkGray"
+                   TextColor="Black"
+                   HorizontalOptions="Start"
+                   Grid.Row="2"
+                   Grid.Column="2" />
+
+            <Label Text="LARGE TEXT"
+                   LineBreakMode="WordWrap"
+                   FontSize="100"
+                   HorizontalOptions="Center"
+                   HorizontalTextAlignment="Center"
+                   Grid.Row="3"
+                   Grid.ColumnSpan="3" />
+
+        </Grid>
+    </ScrollView>
+</ContentPage>
+```
+
+```C#
+using static CommunityToolkit.Maui.Markup.GridRowsColumns;
+
+namespace HelloMaui;
+
+class MainPage : BaseContentPage
+{
+    public MainPage()
+    {
+        BackgroundColor = Colors.DarkViolet;
+
+        Content = new ScrollView
+        {
+            Content = new Grid
+            {
+                BackgroundColor = Colors.LightSteelBlue,
+
+                RowSpacing = 12,
+
+                RowDefinitions = Rows.Define(
+                    (Row.Image, Star),
+                    (Row.Label, 32),
+                    (Row.Entry, 40),
+                    (Row.LargeText, 500)),
+
+                ColumnDefinitions = Columns.Define(
+                    (Column.Entry1, Star),
+                    (Column.Entry2, Star),
+                    (Column.Entry3, Star)),
+
+                Children =
+                {
+                    new Image()
+                        .Center()
+                        .Size(500, 250)
+                        .Aspect(Aspect.AspectFit)
+                        .Source("dotnet_bot.png")
+                        .Row(Row.Image).ColumnSpan(All<Column>()),
+
+                    new Label()
+                        .Text("Hello MAUI", Colors.Black)
+                        .Center()
+                        .TextCenter()
+                        .Row(Row.Label).ColumnSpan(All<Column>()),
+
+                     new Entry()
+                        .End()
+                        .Placeholder("First Entry", Colors.DarkGray)
+                        .TextColor(Colors.Black)
+                        .Row(Row.Entry).Column(Column.Entry1),
+
+                     new Entry()
+                        .CenterHorizontal()
+                        .Placeholder("Second Entry", Colors.DarkGray)
+                        .TextColor(Colors.Black)
+                        .Row(Row.Entry).Column(Column.Entry2),
+
+                     new Entry()
+                        .Start()
+                        .Placeholder("Third Entry", Colors.DarkGray)
+                        .TextColor(Colors.Black)
+                        .Row(Row.Entry).Column(Column.Entry3),
+
+                     new Label { LineBreakMode = LineBreakMode.WordWrap }
+                        .Text("LARGE TEXT")
+                        .TextCenter()
+                        .Font(size: 100)
+                        .Row(Row.LargeText).ColumnSpan(All<Column>())
+                }
+            }.Top().CenterHorizontal()
+        };
+    }
+
+    enum Row { Image, Label, Entry, LargeText }
+    enum Column { Entry1, Entry2, Entry3 }
+}
+```
+
+`AbsoluteLayout`:
+
+- Places elements at specific coordinates.
+- Great for overlays or custom positioning.
+
+```C#
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="HelloMaui.MainPage">
+
+    <AbsoluteLayout>
+        <Image 
+            Source="appicon"
+            Aspect="AspectFit"
+            AbsoluteLayout.LayoutFlags="PositionProportional"
+            AbsoluteLayout.LayoutBounds="0.5,0,500,250" />
+    </AbsoluteLayout>
+
+</ContentPage>
+```
+
+```C#
+using CommunityToolkit.Maui.Markup;
+
+namespace HelloMaui;
+
+public class MainPage : ContentPage
+{
+    public MainPage()
+    {
+        Content = new AbsoluteLayout()
+        {
+            Children =
+            {
+                new Image()
+                    .Size(500, 250)
+                    .Aspect(Aspect.AspectFit)
+                    .Source("appicon")
+                    .LayoutFlags(AbsoluteLayoutFlags.PositionProportional)
+                    .LayoutBounds(0.5, 0)
+            }
+        }
+    }
+}
+```
+
+`FlexLayout`:
+
+- Works like CSS Flexbox.
+- Items can wrap, align, and justify dynamically.
+
+```C#
+<FlexLayout Direction="Row" Wrap="Wrap" JustifyContent="SpaceBetween">
+    <Button Text="1" />
+    <Button Text="2" />
+    <Button Text="3" />
+</FlexLayout>
+```
+
+```C#
+using CommunityToolkit.Maui.Markup;
+
+namespace HelloMaui;
+
+public class MainPage : ContentPage
+{
+    public MainPage()
+    {
+        Content = new FlexLayout
+        {
+            Direction = FlexDirection.Row,
+            Wrap = FlexWrap.Wrap,
+            JustifyContent = FlexJustify.SpaceBetween,
+
+            Children =
+            {
+                new Button().Text("1"),
+                new Button().Text("2"),
+                new Button().Text("3")
+            }
+        };
+    }
+}
+```
+
+There is also `ContentView` which is what we discussed in the last section which is a simple container for one child and `ScrollView` which adds scrolling to the content.
+
+### BaseContentPage & Global Page Config
+
+This is not required but helpful when it comes to adding settings like Safe Area to iOS devices.
+
+```C#
+public abstract class BaseContentPage : ContentPage
+{
+    public BaseContentPage()
+    {
+        On<iOS>.SetUseSafeArea(true);
+    }
+}
+```
+
+We can now just inherit this on our pages.
+
+### Margin & Padding
+
+Margin is space outside a control. It pushes the control away from surrounding elements or the edges of its container.
+
+Padding is space inside a control. It pushes the content away from the control's border.
+
+The methods we can add are `Paddings()` and `Margins()`.
+
+```C#
+using CommunityToolkit.Maui.Markup;
+
+namespace HelloMaui;
+
+public class MainPage : ContentPage
+{
+    public MainPage()
+    {
+        Content = new FlexLayout
+        {
+            Direction = FlexDirection.Row,
+            Wrap = FlexWrap.Wrap,
+            JustifyContent = FlexJustify.SpaceBetween,
+
+            Children =
+            {
+                new Button()
+                    .Text("1")
+                    .Paddings(5, 10, 5, 10),
+
+                new Button()
+                    .Text("2")
+                    .Margins(5, 10, 5, 10)
+            }
+        };
+    }
+}
+```
+
+### XAML
+
+This is going to be a few tips on what can be done in XAML
+
+To start, if we want to use our BaseContentPage we created before, we need to decalre a namespace and then change our ContentPage tag to this
+
+```c#
+<helloMaui:BaseContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+            xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+            xmlns:helloMaui="clr-namespace:HelloMaui"
+            x:Class="HelloMaui.MainPage"
+>
+
+    <AbsoluteLayout>
+        <Image 
+            Source="appicon"
+            Aspect="AspectFit"
+            AbsoluteLayout.LayoutFlags="PositionProportional"
+            AbsoluteLayout.LayoutBounds="0.5,0,500,250" />
+    </AbsoluteLayout>
+
+</helloMaui:BaseContentPage>
+```
+
+### Collection Views
+
+A CollectionView is a flexible and efficient control for displaying a list of data in .NET MAUI. It's used when you need to show scrollable lists of items (like contacts, messages, or products). It supports vertical and horizontal layouts, grid layouts, and item templates for customizing how each item looks. It is the preferred replacement for `ListView` because it's faster, more flexible, and supports modern features.
+
+```C#
+namespace HelloMaui;
+
+public class MainPage : BaseContentPage
+{
+    public MainPage()
+    {
+        Content = new CollectionView()
+        {
+            Header = new Label()
+                .Text("Sample Header For View")
+                .Paddings(bottom: 8)
+                .Font(size: 32)
+                .Center()
+                .TextCenter(),
+
+            Footer = new Label()
+                .Text("Sample Footer For View")
+                .Paddings(left: 8)
+                .Font(size: 10)
+                .Center()
+                .TextCenter(),
+
+            SelectionMode = SelectionMode.Single,
+            
+            ItemsSource = SampleModels,
+
+            ItemTemplate = 
+        }
+        .ItemsSource(SampleModels)
+        .ItemTemplate(new SampleDataTemplate())
+        .Invoke(collectionView => collectionView.SelectionChanged += HandleSelectionChanged)
+    }
+
+    // We are using an ObservableCollection here so when we Add or Delete
+    // elements from this list it will Automatically re-render in the app.
+    ObservableCollection<SampleModel> SampleModels { get; } = new()
+    {
+        new()
+        {
+            Title = "Sample Entry 1",
+            Description = "Sample Description 1",
+            ImageSource = "someImage.jpg"
+        },
+        new()
+        {
+            Title = "Sample Entry 2",
+            Description = "Sample Description 2",
+            ImageSource = "someImage.jpg"
+        },
+        new()
+        {
+            Title = "Sample Entry 2",
+            Description = "Sample Description 2",
+            ImageSource = "someImage.jpg"
+        }
+    };
+
+    // This is called every time a user clicks on a row or if the collectionView is progrmatically changed
+    async void HandleSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        ArgumentNullException.ThrowIfNull(sender);
+
+        var collectionView = (CollectionView) sender;
+
+        if (e.CurrentSelection.FirstOrDefault() is LibraryModel model) {
+            await Toast.Make($"{model.Title} tapped").Show();
+        }
+
+        // This removes the row highlighting which can remain stuck. This does cause
+        // this method to fire again
+        collectionView.SelectedItem = null;
+    }
+}
+
+public class SampleModel
+{
+    public required string Title { get; init; }
+
+    public required string Description { get; init; }
+
+    public required ImageSource ImageSource { get; init; }
+}
+
+// ----
+using CommunityToolkit.Maui.Markup;
+using static CommunityToolkit.Maui.Markup.GridRowColumns;
+
+public class SampleDataTemplate : DataTemplate
+{
+    const int imageRadius = 25;
+    const int imagePadding = 8;
+
+    public SampleDataTemplate() : base(() => CreateGridTemplate())
+    {
+
+    }
+
+    static Grid CreateGridTemplate() => new()
+    {
+        RowDefinitions = Rows.Define(
+            (Row.Title, 22),
+            (Row.Description, 44),
+            (Row.BottomPadding, 8)
+        ),
+
+        ColumnDefinitions = Columns.Define(
+            (Column.Icon, (imageRadius * 2) + (imagePadding * 2)),
+            (ColumnText, Star),
+        ),
+
+        RowSpacing = 4,
+
+        Children = 
+        {
+            new Image()
+                .Row(Row.Title)
+                .RowSpan(2)
+                .Column(Column.Icon)
+                .Center()
+                .Aspect(Aspect.AspectFit)
+                .Size(imageRadius * 2)
+                .Bind(Image.SourceProperty,
+                    getter: (SampleModel model) => model.ImageSource,
+                    mode: BindingMode.OneWay
+                ),
+
+            new Label()
+                .Row(Row.Title)
+                .Column(Column.Text)
+                .Font(size: 18, bold: true)
+                .TextTop()
+                .TextStart()
+                .Bind(Label.TextProperty,
+                    getter: (SampleModel model) => model.Title,
+                    mode: BindingMode.OneWay
+                ),
+
+            new Label()
+                .Row(Row.Description)
+                .Column(Column.Text)
+                .Font(size: 12)
+                .TextTop()
+                .TextStart()
+                .Bind(Label.TextProperty,
+                    getter: (SampleModel model) => model.Description,
+                    mode: BindingMode.OneWay
+                ),
+        }
+    };
+
+    enum Column { Icon, Text }
+    enum Row { Title, Description, BottomPadding }
+}
+```
+
+### Refresh Views
+
+This is a very popular view you see on most (if not all) apps. When the user pulls down the page, an event is sent and a loading icon is displayed while it reloads or fetchesd new data etc.
+
+This example is using the same code as the previous section but truncating some of the extra
+bits.
+
+```C#
+namespace HelloMaui;
+
+public class MainPage : BaseContentPage
+{
+    public MainPage()
+    {
+        Content = new RefreshView
+        {
+            Content = new CollectionView()
+            {
+                Header = new Label()
+                    .Text("Sample Header For View")
+                    .Paddings(bottom: 8)
+                    .Font(size: 32)
+                    .Center()
+                    .TextCenter(),
+
+                Footer = new Label()
+                    .Text("Sample Footer For View")
+                    .Paddings(left: 8)
+                    .Font(size: 10)
+                    .Center()
+                    .TextCenter(),
+
+                SelectionMode = SelectionMode.Single,
+                
+                ItemsSource = SampleModels,
+
+                ItemTemplate = 
+            }
+            .ItemsSource(SampleModels)
+            .ItemTemplate(new SampleDataTemplate())
+            .Invoke(collectionView => collectionView.SelectionChanged += HandleSelectionChanged)
+        }
+        .Invoke(refreshView => refreshView.Refreshing += HandleRefreshing)
+        .Margin(12, 24, 12, 0);
+    }
+
+    // ... Truncated code
+
+    async void HandleRefreshing(object? sender, SelectionChangedEventArgs e)
+    {
+        ArgumentNullException.ThrowIfNull(sender);
+
+        var refreshView = (RefreshView) sender;
+
+        // This would normally be logic to fetch from an external API
+        await task.Delay(TimeSpan.FromSeconds(2));
+
+        // Removes the loading icon
+        refreshView.IsRefreshing = false;
+    }
+}
+```
+
 
 ## Optimising MSSQL Queries
 
