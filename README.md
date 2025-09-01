@@ -114,6 +114,13 @@
     - [XAML](#xaml)
     - [Collection Views](#collection-views)
     - [Refresh Views](#refresh-views)
+    - [Colors](#colors)
+    - [Resources](#resources)
+    - [Styles & Theming](#styles--theming)
+    - [Behaviours](#behaviours)
+    - [Gestures](#gestures)
+    - [Application Lifecycles](#application-lifecycles)
+    - [Shell & Navigation](#shell--navigation)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
 - [Unit testing](#unit-testing)
     - [Libraries](#libraries)
@@ -6491,6 +6498,409 @@ public class MainPage : BaseContentPage
 }
 ```
 
+### Colors
+
+In .NET MAUI, colors can be used in different ways named colors, system colors, hex values, RGB/ARGB, HSL, and from resources.
+
+```C#
+// Named colors
+BackgroundColor = Colors.Red;
+TextColor = Colors.Blue;
+
+// Hex Values
+BackgroundColor = Color.FromArgb("#FF5733");
+
+// RGB / ARGB
+BackgroundColor = Color.FromRgb(255, 87, 51);
+BackgroundColor = Color.FromRgba(255, 87, 51, 128);
+
+// HSL (Hue, Saturation, Luminosity)
+BackgroundColor = Color.FromHsla(0.05, 0.9, 0.5, 1.0); 
+
+//System Colors (Platform-specific)
+BackgroundColor = Application.Current!.Resources["WindowBackgroundColor"] as Color;
+
+// Resource-based Colors (XAML)
+// Setup
+<Application.Resources>
+    <Color x:Key="PrimaryColor">#512BD4</Color>
+</Application.Resources>
+
+//Usage
+<Label Text="Hello MAUI" TextColor="{StaticResource PrimaryColor}" />
+
+// Or
+TextColor = (Color)Application.Current.Resources["PrimaryColor"];
+
+```
+
+### Resources
+
+The Resources folder in a .NET MAUI app is a special place where you put platform-agnostic assets (images, fonts, styles, etc.). At build time, MAUI processes this folder and generates optimized resources for each platform (Android, iOS, Windows, MacCatalyst).
+
+`Resources/Fonts/`
+
+Place your custom fonts here (.ttf or .otf).
+
+Register them in MauiProgram.cs:
+
+```C#
+builder.ConfigureFonts(fonts =>
+{
+    fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
+});
+```
+
+`Resources/Images/`
+
+All images (e.g., .png, .jpg, .svg) go here.
+
+MAUI automatically resizes and optimizes them for each platform (different DPI/density).
+
+`Resources/Raw/`
+
+For raw files (like JSON, MP3, video, text) that you want copied as-is.
+
+Access them using `FileSystem.OpenAppPackageFileAsync`.
+
+```C#
+using var stream = await FileSystem.OpenAppPackageFileAsync("sample.json");
+```
+
+`Resources/Styles/`
+
+Contains `Styles.xaml` where you define app-wide styles, themes, and resource dictionaries.
+Good place for colors, brushes, typography, and reusable UI definitions.
+
+```xml
+<Application.Resources>
+    <ResourceDictionary>
+        <Color x:Key="PrimaryColor">#512BD4</Color>
+        <Style TargetType="Label">
+            <Setter Property="TextColor" Value="{StaticResource PrimaryColor}" />
+        </Style>
+    </ResourceDictionary>
+</Application.Resources>
+```
+
+`AppIcon` & `Splash`
+
+These need to be `svg` format images to make it easily resizeable for MAUI.
+
+### Styles & Theming
+
+We can customise our component styles. This is mainly done in XAML and can find examples in the `Resources/Styles` directory. In this example, we can just make a new Component inheriting from what we want to customise and use that in our code.
+
+```C#
+// Create our customised component
+class LargeFontLabel : Label
+{
+    public LargeFontLabel()
+    {
+        FontSize = 20;
+    }
+}
+
+// Then just use it in our C# code
+new LargeFontLabel()
+    .TextTop()
+    .TextStart() //...
+```
+
+Now, say we want to control our App for Light mode and Dark mode, we can use `AppThemeBinding`.
+
+```C#
+// Component example
+new LargeFontLabel()
+    .AppThemeColorBinding(Label.TextColorProperty, Color.Black, Color.White)
+
+// Background example
+this.AppThemeColorBinding(BackgroundColorProperty, Colors.White, Colors.Black);
+```
+
+### Behaviours
+
+Behaviors in .NET MAUI let you attach extra functionality to controls without subclassing them.
+
+```C#
+// Implementing a previous defined behaviour
+readonly SearchBar _searchBar;
+
+new SearchBar()
+    .Placeholder("Search...")
+    .Behaviours(new UserStoppedTypingBehaviour()
+    {
+        StoppedTypingTimeThreshold = 1000,
+        ShouldDismissKeyboardAutomatically = true,
+        Command = new Command(() => UserStoppedTyping())
+    })
+    .Assign(out _searchBar)
+
+// Method implementation
+void UserStoppedTyping()
+{
+    // Example of getting access to the search bar we made
+    var searchbarText = _searchBar.Text;
+
+    if (string.IsNullOrWhitespace(searchbarText)) {
+        // initial state
+    }
+
+    // Filter list logic
+}
+```
+
+We can also create our own behaviours
+
+```C#
+// Implement a behaviour
+using Microsoft.Maui.Controls;
+
+namespace HelloMaui.Behaviors;
+
+public class SearchDelayBehavior : Behavior<SearchBar>
+{
+    private CancellationTokenSource _cts;
+
+    protected override void OnAttachedTo(SearchBar bindable)
+    {
+        base.OnAttachedTo(bindable);
+        bindable.TextChanged += OnTextChanged;
+    }
+
+    protected override void OnDetachingFrom(SearchBar bindable)
+    {
+        base.OnDetachingFrom(bindable);
+        bindable.TextChanged -= OnTextChanged;
+    }
+
+    private async void OnTextChanged(object sender, TextChangedEventArgs e)
+    {
+        _cts?.Cancel();
+        _cts = new CancellationTokenSource();
+
+        try
+        {
+            // Wait 500ms after last key press
+            await Task.Delay(500, _cts.Token);
+
+            var searchBar = (SearchBar)sender;
+
+            await Application.Current.MainPage.DisplayAlert("Search Triggered", $"Searching for: {searchBar.Text}", "OK");
+        }
+        catch (TaskCanceledException)
+        {
+            // Ignore if user keeps typing
+        }
+    }
+}
+
+
+// Use our behaviour
+new SearchBar
+{
+    Placeholder = "Type to search...",
+    Behaviors = { new SearchDelayBehavior() }
+};
+```
+
+### Gestures
+
+We can control gestures and respond as expected in MAUI. The types of Gestures include
+
+- Tap
+- Pan
+- Pinch
+- Swipe
+- Drag
+- Pointer (Desktop only)
+
+There is also a Library to extend this fnuctionality here - https://github.com/vapolia/MauiGestures
+
+Example (Silly example but just for demonstration)
+
+```C#
+new SearchBar()
+    .TapGesture(async () => {
+        await Toast.Make("Double Tapped").Show();
+    }, 2)
+```
+
+### Application Lifecycles
+
+In .NET MAUI, the application lifecycle is about how your app starts, runs, pauses, resumes, and stops and it changes depending on the platform.
+
+These can be found in any class that inherits from `Application` e.g `App.xaml.cs`
+
+We can override the lifecycle methods and below is a few of the main ones.
+
+```C#
+protected override void OnStart()
+{
+    // Called when the app first starts
+}
+
+protected override void OnSleep()
+{
+    // Called when the app is backgrounded (e.g., user switches apps)
+}
+
+protected override void OnResume()
+{
+    // Called when the app comes back from background
+}
+```
+
+There is also methods like `CreateWindow()` where we can make multi-window apps for desktop applications.
+
+Each page (like `ContentPage`) also has lifecycle events called `Page Lifecycles`
+
+```C#
+protected override void OnAppearing()
+{
+    base.OnAppearing();
+    // Runs when the page is visible
+}
+
+protected override void OnDisappearing()
+{
+    base.OnDisappearing();
+    // Runs when the page is navigated away from
+}
+
+protected override void OnNavigatedTo()
+{
+    // Runs when the page is navigated to 
+}
+
+protected override void OnNavigatedFrom()
+{
+    // Runs when the page is navigated away from
+}
+```
+
+### Shell & Navigation
+
+.NET MAUI Shell gives you a simple way to structure navigation in your app (tabs, flyouts, hierarchical navigation) without writing all the boilerplate.
+
+The types of Navigation we have include
+
+- Flyout (like a side drawer)
+- Tabs
+- Hierarchical (stack based)
+
+In this example, we will implement the AppShell in pure C#
+
+```C#
+namespace HelloMaui;
+
+public class AppShell : Shell
+{
+    public AppShell(MainPage mainPage)
+    {
+        Items.Add(mainPage);
+    }
+}
+
+// In our App.xaml.cs, inject our AppShell and set it to MainPage Property
+public partial class App : Application
+{
+    public App(AppShell shell)
+    {
+        InitializeComponent();
+
+        MainPage = shell; 
+    }
+}
+
+// Then set up our dependency injection in MauiProgram.cs
+builder.Services.AddSingleton<AppShell>();
+builder.Services.AddSingleton<App>();
+
+builder.Services.AddTransient<MainPage>();
+```
+
+To navigate from from page to another, we need to set up some routes in `AppShell.cs`
+
+```C#
+public partial class AppShell : Shell
+{
+    public AppShell()
+    {
+        InitializeComponent();
+        RegisterRoutes();
+    }
+
+    private void RegisterRoutes()
+    {
+        RegisterRoute<MainPage>();
+        RegisterRoute<DetailsPage>();
+        // Add more pages as needed
+    }
+
+    private static void RegisterRoute<TPage>() where TPage : BaseContentPage
+    {
+        string route = typeof(TPage).Name;
+        Routing.RegisterRoute(route, typeof(TPage));
+    }
+}
+```
+
+Then we can add something like this to a Gesture or Event Handler
+
+```C#
+// Data to pass into the route
+var pageData = new Dictionary<string, object>
+{
+    { "TestData": modelData }
+};
+
+// Second param is optional just to pass data
+await Shell.Current.GoToAsync(Routes.Details, pageData);
+```
+
+When navigating, if we do want to pass data we need to implement the `IQueryAttributable` interface and the required method.
+
+```C#
+public class DetailsPage : BaseContentPage, IQueryAttributable
+{
+    private readonly Label _labelText;
+
+    public DetailsPage()
+    {
+
+    }
+
+    // From the interface
+    public void ApplyQueryAttributes(IDictionary<string, object> query)
+    {
+        // This gets all the data we pass. We can also cast query to the type
+        // of object passed in.
+        var passedData = query["TestData"];
+
+        // We can just assign any data we need from this object and attach it to our components
+        // using the Assign() passing in our _labelText
+        _labelText = passedData.SomeLabelData;
+    }
+}
+```
+
+In our content pages, we can also modify the behaviour of the back button. Each page also has a prop caled `Title` which can be set to display a title in the bar across the top  next to the back icon or text.
+
+```C#
+// Changes the back icon to the word
+Shell.SetBackButtonBehaviour(this, new() {
+    TextOverride = "Back"
+})
+```
+
+If we need to make a custom back button, we can do something like this
+
+```C#
+new Button()
+    .Text("Back")
+    .Invoke(async () => await Shell.Current.GoToAsync(".."))
+```
 
 ## Optimising MSSQL Queries
 
