@@ -121,6 +121,9 @@
     - [Gestures](#gestures)
     - [Application Lifecycles](#application-lifecycles)
     - [Shell & Navigation](#shell--navigation)
+    - [MVVM](#mvvm)
+    - [MVVM Community Toolkit](#mvvm-community-toolkit) 
+    - [iOS Issue](#ios-issue)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
 - [Unit testing](#unit-testing)
     - [Libraries](#libraries)
@@ -5757,6 +5760,8 @@ public class SmtpMailSender(
 
 ## Dotnet MAUI
 
+Documentation - https://learn.microsoft.com/en-us/dotnet/maui/get-started/installation?view=net-maui-9.0&tabs=visual-studio
+
 ### Installing Dotnet MAUI
 
 First we need to make sure we have the .NET SDK installed.
@@ -6900,6 +6905,531 @@ If we need to make a custom back button, we can do something like this
 new Button()
     .Text("Back")
     .Invoke(async () => await Shell.Current.GoToAsync(".."))
+```
+
+### MVVM
+
+`MVVM` is an acronym for `Model View View-Model`. The `View` handles the UI, the `View Model` handles the business logic and the `Model` handles the data structure.
+
+In .NET MAUI, MVVM works by using the `INotifyPropertyChanged` interface. This updates a property name between the `View` and `View-Model` when the value changes. When a property is updated, MAUI redraws the UI using the new value. The name for this is called `Bindings`.
+
+We use this pattern for future maintenence when our Application grows. It also helps with keeping our data loosely coupled so our view and view-model know nothing about each other and helps with separation of concerns so it is easy to replace or modify our UI or business logic in the future.
+
+Our folder structure would normally end up something like this:
+
+```bash
+MyMauiApp/
+│
+├── App.xaml
+├── App.xaml.cs
+│
+├── Models/                  # Business/domain objects
+│   └── User.cs
+│   └── Product.cs
+│
+├── ViewModels/              # ViewModels (logic & state for each page)
+│   └── MainPageViewModel.cs
+│   └── DetailsPageViewModel.cs
+│
+├── Pages/                   # Full content pages
+│   └── MainPage.xaml
+│   └── MainPage.xaml.cs
+│   └── DetailsPage.xaml
+│   └── DetailsPage.xaml.cs
+│   └── AppShell.xaml
+│   └── AppShell.xaml.cs
+│
+├── Views/                   # Reusable components (partial UI)
+│   └── HeaderView.xaml
+│   └── HeaderView.xaml.cs
+│   └── ProductCard.xaml
+│   └── ProductCard.xaml.cs
+│
+├── Services/                # App services (API calls, auth, persistence, etc.)
+│   └── ApiService.cs
+│   └── AuthService.cs
+│
+├── Helpers/                 # Utilities, converters, constants
+│   └── BoolToVisibilityConverter.cs
+│   └── SettingsHelper.cs
+│
+├── Resources/               # Static app resources (MAUI-specific)
+│   ├── Fonts/
+│   ├── Images/
+│   ├── Raw/
+│   ├── Styles/              # Centralised styles/themes
+│   │   └── Styles.xaml
+│
+└── Platforms/               # Platform-specific code
+    ├── Android/
+    ├── iOS/
+    ├── MacCatalyst/
+    └── Windows/
+```
+
+This is not a concrete example of what we need to do to implement `MVVM` but it makes binding a little easier. We can create a base class for all our `View-Models` to inherit from `INotifyPropertyChanged` like this.
+
+```C#
+using System.ComponentModel;
+using SystemRuntime.CompilerServices;
+
+namespace HelloMaui.ViewModels;
+
+public abstract class BaseViewModel : INotifyPropertyChanged
+{
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    // CallerMemberName attribute automatically calls the nameof() and handles this so we don't have to
+    // write it each time.
+    protected bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value)) {
+            return false;
+        }
+
+        field = value;
+
+        OnPropertyChanged(propertyName);
+
+        return true;
+    }
+}
+```
+
+When naming our `View-Models` it is normally named the same as our View page but with ViewModel appended on the end. e.g. `HomePage` will get a View-Model called `HomeViewModel`.
+
+```C#
+using System.Windows.Input;
+
+namespace HelloMaui.ViewModels;
+
+public class MainPageViewModel : BaseViewModel
+{
+    private string _username;
+    private int _count;
+
+    public string Username
+    {
+        get => _username;
+        set => SetProperty(ref _username, value);
+    }
+
+    public int Count
+    {
+        get => _count;
+        set => SetProperty(ref _count, value);
+    }
+
+    public ICommand IncrementCommand { get; }
+
+    public MainPageViewModel()
+    {
+        _username = "Guest";
+        _count = 0;
+
+        IncrementCommand = new Command(OnIncrement);
+
+        // If we have an async function returning a Task, use this
+        // IncrementCommand = new AsyncRelayCommand(OnIncrement);
+    }
+
+    private void OnIncrement()
+    {
+        Count++;
+    }
+}
+```
+
+We then initialise this in our View and bind the properties to our components
+
+```C#
+using CommunityToolkit.Maui.Markup;
+using HelloMaui.ViewModels;
+using static CommunityToolkit.Maui.Markup.GridRowsColumns;
+
+namespace HelloMaui.Pages;
+
+public class MainPage : ContentPage
+{
+    public MainPage()
+    {
+        // This is how we can bind to our Page Properties
+        // We will just set our title to the username as an example
+        this.Bind(MainPage.TitleProperty,
+            getter: (MainPageViewModel vm) => vm.Username
+        )
+
+        Content = new VerticalStackLayout
+        {
+            Spacing = 12,
+            Padding = 20,
+
+            Children =
+            {
+                new Entry()
+                    .Placeholder("Enter your name")
+                    .Bind(Entry.TextProperty, 
+                        getter: (MainPageViewModel vm) => vm.Username
+                    ),
+
+                new Label()
+                    .Font(size: 20)
+                    .Bind(Label.TextProperty, 
+                        getter: (MainPageViewModel vm) => vm.Username
+                    ),
+
+                new Label()
+                    .Font(size: 20)
+                    .Bind(Label.TextProperty, 
+                        getter: (MainPageViewModel vm) => vm.Count
+                    ),
+
+                new Button()
+                    .Text("Increment")
+                    .BindCommand(Button.CommandProperty,
+                        getter: (MainPageViewModel vm) => vm.IncrementCommand
+                    )
+            }
+        };
+    }
+}
+```
+
+We also have `BindingContexts` which is essentially the data source for your UI controls.
+
+It works like this
+- Your Page or Layout has a `BindingContext`.
+- Any child controls inside that page automatically inherit the same `BindingContext` (unless you override it).
+- When you write a binding (e.g., `Label.Text = "{Binding Username}"`), MAUI looks for a property called Username on the current `BindingContext`.
+
+```C#
+using CommunityToolkit.Maui.Markup;
+using HelloMaui.ViewModels;
+using static CommunityToolkit.Maui.Markup.GridRowsColumns;
+
+namespace HelloMaui.Pages;
+
+public class MainPage : ContentPage
+{
+    public MainPage()
+    {
+        // Tell the binding context what ViewModel we are using
+        BindingContext = new MainPageViewModel();
+
+        Content = new VerticalStackLayout
+        {
+            Spacing = 12,
+            Padding = 20,
+
+            Children =
+            {
+                new Entry()
+                    .Placeholder("Enter your name")
+                    .Bind(Entry.TextProperty, 
+                        getter: (MainPageViewModel vm) => vm.Username,
+                        setter: (MainPageViewModel vm, string value) => vm.Username = value,
+                        mode: BindingMode.TwoWay //optional
+                    ),
+
+                new Label()
+                    .Font(size: 20)
+                    .Bind(Label.TextProperty, 
+                        getter: (MainPageViewModel vm) => vm.Username
+                    ),
+
+                new Label()
+                    .Font(size: 20)
+                    .Bind(Label.TextProperty, 
+                        getter: (MainPageViewModel vm) => vm.Count
+                    ),
+
+                new Button()
+                    .Text("Increment")
+                    .BindCommand(Button.CommandProperty,
+                        getter: (MainPageViewModel vm) => vm.IncrementCommand
+                    )
+            }
+        };
+    }
+}
+```
+
+We can update our `BaseContentPage` like this to make things a little easier also.
+
+```C#
+public abstract class BaseContentPage<TViewModel> : ContentPage
+    where TViewModel : BaseViewModel
+{
+    public BaseContentPage(TViewModel viewModel)
+    {
+        On<iOS>.SetUseSafeArea(true);
+
+        BindingContent = viewModel;
+    }
+}
+
+// We then update our pages like this
+public class HomePage : BaseContentPage<HomeViewModel>
+{
+    public HomePage(HomeViewModel viewModel) : base(viewModel)
+    {
+        //
+    }
+}
+```
+
+Don't forget to also register your ViewModels in the dependency injection container.
+
+```C#
+builder.Services.AddTransient<HomeViewModel>();
+```
+
+.NET MAUI does not set the BindingContext of a behavior, because behaviors can be shared and applied to multiple controls through styles.
+
+To fix this we can just set the bindingCOntext in the behaviour.
+
+```C#
+.Behaviours(new UserStoppedTypingBehaviour()
+{
+    BindingContext = viewModel,
+    // Rest of the props....
+})
+```
+
+More information here - https://learn.microsoft.com/en-us/dotnet/maui/fundamentals/behaviors?view=net-maui-9.0
+
+### MVVM Community Toolkit
+
+https://learn.microsoft.com/en-gb/dotnet/communitytoolkit/mvvm/
+
+In the previous section, we went through setting up `MVVM` ourselves. There is a package called `CommunityToolkit.Mvvm` which can make our lives easier.
+
+```bash
+dotnet add package CommunityToolkit.Mvvm
+```
+
+The CommunityToolkit.Mvvm package is a huge productivity booster for MVVM in .NET MAUI. It provides source generators and attributes so you don’t have to write all the boilerplate `INotifyPropertyChanged`, commands, etc. yourself.
+
+In this library, we use Attributes to simplify the code.
+- [RelayCommand]
+- [ObservableProperty]
+- [AlsoNotifyChangeFor]
+- [AlsoNotifyCanExecuteFor]
+
+If we are using a `BaseViewModel` class, we can easily implement the functionality by inheriting from the `ObervableObject` class.
+
+```C#
+public abstract class BaseViewModel : ObservableObject
+{
+
+}
+```
+
+Instead of writing your own BaseViewModel, you can inherit from ObservableObject and use [ObservableProperty].
+
+(Note: in the examples, we are now using partial classes. This is required by the MVVM Community Toolkit library).
+
+```C#
+using CommunityToolkit.Mvvm.ComponentModel;
+
+namespace HelloMaui.ViewModels;
+
+public partial class MainPageViewModel : ObservableObject
+{
+    // Generates a property with change notification:
+    [ObservableProperty]
+    private string username;
+
+    [ObservableProperty]
+    private int counter;
+}
+```
+
+Instead of writing `ICommand` manually, you can use [RelayCommand].
+
+```C#
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+
+namespace HelloMaui.ViewModels;
+
+public partial class MainPageViewModel : ObservableObject
+{
+    [ObservableProperty]
+    private int counter;
+
+    [RelayCommand]
+    private void IncrementCounter()
+    {
+        Counter++;
+    }
+}
+```
+
+We can now bind like this
+
+```C#
+Content = new VerticalStackLayout
+{
+    Spacing = 12,
+    Padding = 20,
+
+    Children =
+    {
+        new Entry()
+            .Placeholder("Enter your name")
+            .Bind(
+                Entry.TextProperty,
+                getter: (MainPageViewModel vm) => vm.Username,
+                setter: (MainPageViewModel vm, string value) => vm.Username = value,
+                mode: BindingMode.TwoWay
+            ),
+
+        new Label()
+            .Bind(
+                Label.TextProperty,
+                getter: (MainPageViewModel vm) => vm.Username
+            ),
+
+        new Button()
+            .Text("Click Me")
+            .BindCommand((MainPageViewModel vm) => vm.IncrementCounterCommand),
+
+        new Label()
+            .Bind(
+                Label.TextProperty,
+                getter: (MainPageViewModel vm) => vm.Counter
+            )
+    }
+};
+
+```
+
+We can also use `AlsoNotifyChangeFor` to tell the source generator to change the value of another property.
+
+```C#
+using CommunityToolkit.Mvvm.ComponentModel;
+
+namespace HelloMaui.ViewModels;
+
+public partial class PersonViewModel : ObservableObject
+{
+    [ObservableProperty]
+    [AlsoNotifyChangeFor(nameof(FullName))]
+    private string firstName;
+
+    [ObservableProperty]
+    [AlsoNotifyChangeFor(nameof(FullName))]
+    private string lastName;
+
+    public string FullName => $"{FirstName} {LastName}";
+}
+```
+
+`AlsoNotifyCanExecuteFor` tells the source generator that when a property changes, check if this command can execute. The below example does not allow the user to login until a username and password are both set.
+
+```C#
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+
+namespace HelloMaui.ViewModels;
+
+public partial class LoginViewModel : ObservableObject
+{
+    [ObservableProperty]
+    [AlsoNotifyCanExecuteFor(nameof(LoginCommand))]
+    private string username;
+
+    [ObservableProperty]
+    [AlsoNotifyCanExecuteFor(nameof(LoginCommand))]
+    private string password;
+
+    [RelayCommand(CanExecute = nameof(CanLogin))]
+    private void Login()
+    {
+        // Perform login logic
+    }
+
+    private bool CanLogin()
+    {
+        return !string.IsNullOrWhiteSpace(Username) && 
+               !string.IsNullOrWhiteSpace(Password);
+    }
+}
+```
+
+```C#
+using CommunityToolkit.Maui.Markup;
+using HelloMaui.ViewModels;
+
+namespace HelloMaui.Pages;
+
+public class LoginPage : ContentPage
+{
+    public LoginPage()
+    {
+        var viewModel = new LoginViewModel();
+        BindingContext = viewModel;
+
+        Content = new VerticalStackLayout
+        {
+            Spacing = 12,
+            Padding = 20,
+
+            Children =
+            {
+                new Entry()
+                    .Placeholder("Username")
+                    .Bind(Entry.TextProperty, 
+                        getter: (LoginViewModel vm) => vm.Username
+                    ),
+
+                new Entry()
+                    .Placeholder("Password")
+                    .IsPassword(true)
+                    .Bind(Entry.TextProperty, 
+                        getter: (LoginViewModel vm) => vm.Password
+                    ),
+
+                new Button()
+                    .Text("Login")
+                    .BindCommand((LoginViewModel vm) => vm.LoginCommand)
+            }
+        };
+    }
+}
+```
+
+### iOS Issue
+
+If we have an obvervable property in our view model which is updated in a loop (e.g adding new rows to a Observable List) then this can cause an OutOfRangeException to be thrown as iOS cannot write the values fast enough. We can work around this by making sure we keep everything on the main UI thread.
+
+We can do this by injecting the `IDispatcher` through our View Model constructor and setting a field.
+
+We then just need to change our method causing the issue to an async method with a Task return type.
+
+```C#
+public partial class ExampleFix(IDispatcher dispatcher)
+{
+    [ObservableProperty]
+    private List<string> users;
+
+    [RelayCommand]
+    async Task UserStoppedTyping()
+    {
+        // Imagine having some list we are going to loop over
+        foreach (var user in newUsers) {
+            // Everytime we want to update our list, we use DispatchAsync
+            // to keep it on the main thread
+            await dispatcher.DispatchAsync(() => users.Add(user));
+        }
+    }
+}
 ```
 
 ## Optimising MSSQL Queries
