@@ -9,6 +9,8 @@
 - [Setup](#setup)
     - [New Project Notes](#new-project-notes)
     - [Setting Up DotNetEnv](#setting-up-dotnetenv)
+    - [Mapping Custom Endpoints For Razor Pages](#mapping-custom-endpoints-for-razor-pages)
+    - [Creating A Library For Shared Code](#creating-a-library-for-shared-code)
 - [Setup Secure Configuration](#setup-secure-configuration)
     - [Initial Config](#initial-config) 
     - [Setting Up Environment Variables Linux](#setting-up-environment-variables-linux)
@@ -24,8 +26,6 @@
     - [Link Projects To Solution](#link-projects-to-solution)
     - [Link Projects As Dependencies](#link-projects-as-dependencies)
     - [Create A Migration In Another Project Folder](#create-a-migration-in-another-project-folder)
-- [Mapping Custom Endpoints For Razor Pages](#mapping-custom-endpoints-for-razor-pages)
-- [Creating A Library For Shared Code](#creating-a-library-for-shared-code)
 - [Async & Await](#async--await)
     - [Intro To Async Await](#intro-to-async-await)
     - [What We Used Before](#what-we-used-before)
@@ -358,6 +358,35 @@ services.AddAuthentication(options =>
 });
 ```
 
+### Mapping Custom Endpoints For Razor Pages
+
+This can be done in `Startup.cs` but is a bit messy and better to be done in a controller.
+
+```C#
+    app.UseEndpoints(endpoints => {
+        endpoints.MapRazorPages();
+
+        endpoints.MapGet("/products", context => {
+            var products = app.ApplicationServices.GetService<JsonFileProductService>().GetProducts()
+
+            var json = JsonSerializer.Serialize<IEnumberable<Product>>(products);
+
+            return context.Response.WriteAsync(json);
+        })
+    });
+```
+
+### Creating A Library For Shared Code
+
+Right click on the solution and click Add -> New Project.
+
+Search for library.
+
+Move code over and update the namespaces.
+
+Right click on the project you want to insert it into and add as a dependency to be able to import it.
+
+
 ## Setup Secure Configuration
 
 ### Initial Config
@@ -590,34 +619,6 @@ a migration from our API project but place it in the Infrastructure with our con
 ```bash
 dotnet ef --startup-project ./ApartmentBooking.Api/ApartmentBooking.Api.csproj migrations add MyMigration --output-dir Migrations --project ./ApartmentBooking.Infrastructure/ApartmentBooking.Infrastructure.csproj
 ```
-
-## Mapping Custom Endpoints For Razor Pages
-
-This can be done in `Startup.cs` but is a bit messy and better to be done in a controller.
-
-```C#
-    app.UseEndpoints(endpoints => {
-        endpoints.MapRazorPages();
-
-        endpoints.MapGet("/products", context => {
-            var products = app.ApplicationServices.GetService<JsonFileProductService>().GetProducts()
-
-            var json = JsonSerializer.Serialize<IEnumberable<Product>>(products);
-
-            return context.Response.WriteAsync(json);
-        })
-    });
-```
-
-## Creating A Library For Shared Code
-
-Right click on the solution and click Add -> New Project.
-
-Search for library.
-
-Move code over and update the namespaces.
-
-Right click on the project you want to insert it into and add as a dependency to be able to import it.
 
 ## Async & Await
 
