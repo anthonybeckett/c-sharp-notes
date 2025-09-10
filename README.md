@@ -6,7 +6,9 @@
 - [Oh My Posh](#oh-my-posh)
 - [VS Code Extensions](#vs-code-extensions)
 - [Useful Commands](#useful-commands)
-- [Setup New Project Notes](#setup-new-project-notes)
+- [Setup](#setup)
+    - [New Project Notes](#new-project-notes)
+    - [Setting Up DotNetEnv](#setting-up-dotnetenv)
 - [Setup Secure Configuration](#setup-secure-configuration)
     - [Initial Config](#initial-config) 
     - [Setting Up Environment Variables Linux](#setting-up-environment-variables-linux)
@@ -177,7 +179,9 @@ dotnet run watch
 dotnet ef database update
 ```
 
-## Setup New Project Notes
+## Setup
+
+### New Project Notes
 
 When using .NET api, add MapControllers() to the program.cs to enable controllers
 
@@ -193,6 +197,166 @@ app.UseEndpoints(endpoints => {
 app.MapControllers();
 
 ```  
+
+### Setting Up DotNetEnv
+
+In some cases, we may want to use a `.env` file to store more sensitive parameters. For this we can use a package called `DotNetEnv`. In your main project (usually with `Program.cs`) add the package.
+
+```bash
+dotnet add package DotNetEnv
+```
+
+In your `Program.cs` add this line
+
+```C#
+// If your .env file is in the same directory as your csprob and Program.cs
+DotNetEnv.Env.Load();
+
+// If you have it in your root project but have your project in a src folder, add the relative
+// path as an argument
+DotNetEnv.Env.Load("../.env");
+```
+
+In this instance, we will use this file to store our Database credentials. Lets add this to our `.env`
+
+```
+DB_CONNECTION="{Some database connection string goes here}"
+```
+
+Next, in our service where we are initialising our database, lets fetch the variable and pass it to our setup function.
+
+```C#
+var connString = Environment.GetEnvironmentVariable("DB_CONNECTION");
+
+services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(connString));
+```
+
+If we are using docker, we can map our .env variables to our Environment in our `compose.yaml` file then access them like this.
+
+```yml
+services:
+  api:
+    build: .
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    environment:
+      - DOTNET_ENVIRONMENT=${DOTNET_ENVIRONMENT}
+      - JWT__Secret=${JWT_SECRET}
+      - JWT__Issuer=${JWT_ISSUER}
+      - JWT__Audience=${JWT_AUDIENCE}
+      - DB_CONNECTION=${DB_CONNECTION}
+    depends_on:
+      - db
+```
+
+```C#
+var jwtSettings = new JwtSettings
+{
+    Audience = Environment.GetEnvironmentVariable("JWT_AUDIENCE") 
+               ?? configuration["Jwt:Audience"],
+               
+    Issuer = Environment.GetEnvironmentVariable("JWT_ISSUER") 
+             ?? configuration["Jwt:Issuer"],
+             
+    Secret = Environment.GetEnvironmentVariable("JWT_SECRET") 
+             ?? configuration["Jwt:Secret"],
+             
+    TokenValidityInMinutes = int.Parse(
+        Environment.GetEnvironmentVariable("JWT_TOKEN_VALIDITY_MINUTES") 
+        ?? configuration["Jwt:TokenValidityInMinutes"] 
+        ?? "15"),
+        
+    RefreshTokenValidityInDays = int.Parse(
+        Environment.GetEnvironmentVariable("JWT_REFRESH_TOKEN_VALIDITY_DAYS") 
+        ?? configuration["Jwt:RefreshTokenValidityInDays"] 
+        ?? "60")
+};
+
+// We could also just make a helper function 
+static class ConfigurationExtensions
+{
+    public static string GetEnvOrConfig(this IConfiguration config, string envVar, string configKey, string? defaultValue = null)
+    {
+        return Environment.GetEnvironmentVariable(envVar) ?? config[configKey] ?? defaultValue ?? throw new InvalidOperationException($"Missing configuration for {configKey}");
+    }
+
+    public static int GetEnvOrConfigInt(this IConfiguration config, string envVar, string configKey, int defaultValue)
+    {
+        var value = Environment.GetEnvironmentVariable(envVar) ?? config[configKey];
+        return int.TryParse(value, out var result) ? result : defaultValue;
+    }
+}
+
+// Then do this instead
+var jwtSettings = new JwtSettings
+{
+    Audience = configuration.GetEnvOrConfig("JWT_AUDIENCE", "Jwt:Audience"),
+    Issuer = configuration.GetEnvOrConfig("JWT_ISSUER", "Jwt:Issuer"),
+    Secret = configuration.GetEnvOrConfig("JWT_SECRET", "Jwt:Secret"),
+    TokenValidityInMinutes = configuration.GetEnvOrConfigInt("JWT_TOKEN_VALIDITY_MINUTES", "Jwt:TokenValidityInMinutes", 15),
+    RefreshTokenValidityInDays = configuration.GetEnvOrConfigInt("JWT_REFRESH_TOKEN_VALIDITY_DAYS", "Jwt:RefreshTokenValidityInDays", 60)
+};
+```
+
+The last way we can make this easier is by setting our `.env` variables with `__` and binding it to a object.
+
+```env
+Jwt__Audience=https://localhost:5001
+Jwt__Issuer=https://localhost:5001
+Jwt__Secret=q(v1qc7cfk%9s&gr$s672mw$)nabroi&d3bc6ww8&jf+ia#h+%
+Jwt__TokenValidityInMinutes=15
+Jwt__RefreshTokenValidityInDays=60
+```
+
+```C#
+// Create an object to bind to
+public class JwtSettings
+{
+    public string Audience { get; set; } = default!;
+    public string Issuer { get; set; } = default!;
+    public string Secret { get; set; } = default!;
+    public int TokenValidityInMinutes { get; set; } = 15;
+    public int RefreshTokenValidityInDays { get; set; } = 60;
+}
+
+// Bind in our Program.cs or wherever this is being configured
+var jwtSettings = new JwtSettings();
+configuration.GetSection("Jwt").Bind(jwtSettings);
+
+// Or shorter with dependency injection
+services.Configure<JwtSettings>(configuration.GetSection("Jwt"));
+```
+
+Now we can use it like so:
+
+```C#
+var jwtSettings = builder.Configuration.GetSection("Jwt").Get<JwtSettings>();
+
+services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.SaveToken = true;
+    options.TokenValidationParameters = new()
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(
+            Encoding.UTF8.GetBytes(jwtSettings.Secret)
+        ),
+        ValidIssuer = jwtSettings.Issuer,
+        ValidAudience = jwtSettings.Audience,
+        ValidateLifetime = true,
+        ClockSkew = TimeSpan.Zero
+    };
+});
+```
 
 ## Setup Secure Configuration
 
@@ -5777,6 +5941,8 @@ sudo dotnet workload install maui
 For Windows:
 
 We will need to download Visual Studio. On the workloads screen in the installer, we need to add the .NET MAUI option.
+
+Note: on multiple machines for me, I could not get the Android emulator to work through visual studio. If this happens, download Android Studio and set up a virtual device. Run it and Visual Studio should detect it in the device dropdown.
 
 If we use VS Code to develop, there is a .NET MAUI extension that can be downloaded from the extensions tab.
 
