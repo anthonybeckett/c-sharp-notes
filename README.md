@@ -19,6 +19,23 @@
 - [C# Topics](#c-topics)
     - [Extension Methods](#extension-methods)
     - [IHttpContextAccessor](#ihttpcontextaccessor)
+    - [Switch Expressions](#switch-expressions)
+    - [Collections](#collections)
+    - [Enums](#enums)
+    - [Structs](#structs)
+    - [Records](#records)
+    - [Generics](#generics)
+    - [Tuples](#tuples)
+    - [Strings & Bytes](#strings--bytes)
+    - [Streams](#streams)
+    - [Working With Files](#working-with-files)
+    - [IDisposable](#idisposable)
+    - [XML & Json](#xml--json)
+    - [Callbacks & Delegates](#callbacks--delegates)
+    - [Lazy Class](#lazy-class)
+    - [Events](#events)
+    - [Threads](#threads)
+    - [Background Workers](#background-workers)
 - [Dotnet CLI Tips And References](#dotnet-cli-tips-and-references)
     - [Create A New Solution](#create-a-new-solution) 
     - [Add New Web API Project](#add-new-web-api-project)
@@ -572,6 +589,1154 @@ public class CurrentUserService
 }
 ```
 
+### Switch Expressions
+
+Starting with C# 8.0, you can use switch expressions to make branching code more concise and expressive compared to traditional switch statements.
+
+```C#
+// Simple example
+static string GetDayType(DayOfWeek day) =>
+        day switch
+        {
+            DayOfWeek.Saturday => "Weekend",
+            DayOfWeek.Sunday   => "Weekend",
+            _                  => "Weekday" // Default case
+        };
+
+// Example using pattern matching
+static string DescribeNumber(int number) =>
+    number switch
+    {
+        < 0 => "Negative",
+        0   => "Zero",
+        > 0 and < 10 => "Small positive number",
+        _   => "Large number"
+    };
+```
+
+- The `switch` keyword is used as an expression instead of a statement.
+- The result is returned directly.
+- The `_` pattern acts like the `default` case.
+- Each arm uses `=>` instead of `:`.
+
+
+### Collections
+
+This section is going to contain some examples of collections in C#. 
+
+---
+
+Arrays (The original primitive type):
+
+- Arrays are zero based index.
+- Arrays are fixed in size.
+- Arrays are mutable.
+
+```C#
+// Different ways of declaring arrays
+int[] numbers = new int[3];
+
+numbers[0] = 1;
+
+int[] numbers2 = new int[]
+{
+    1,
+    2,
+    3
+};
+
+char[] letters = {
+    'a',
+    'b',
+    'c'
+};
+
+char[] letters2 = [
+    'd',
+    'e',
+    'f'
+];
+
+// Accessing & Setting Array values
+numbers[0] = 1;
+
+int valueFromArray = numbers[1]; // 2
+```
+
+---
+
+Lists:
+
+- Zero based index
+- Dynamic in size
+- Mutable
+- Can call functions such as `Add()`, `Remove()`, `Clear()` etc.
+
+```C#
+// Initialisation
+List<string> words = new();
+
+words.Add("Word One");
+words.Add("Word Two");
+words.Add("Word Three");
+
+List<int> numbers = new() {
+    1,
+    2,
+    3
+};
+```
+
+---
+
+Dictionaries:
+
+- Stored in Key, Value pairs
+- Dynamic in size
+- Can call functions such as `Add()`, `Remove()`, `Clear()` etc.
+
+```C#
+// Init a dictionary
+Dictionary<string, int> wordsToNumbers = new();
+
+// Setting a value in an already existing dictionary
+wordsToNumbers.Add("one", 1);
+wordsToNumbers.Add("two", 2);
+wordsToNumbers.Add("three", 3);
+
+// Getting values from a dictionary
+int one = wordsToNumbers["one"];
+
+// Other ways they can be initialized
+Dictionary<string, int> wordsToNumbers2 = new()
+{
+    { "four", 4 },
+    { "five", 5 }
+};
+
+Dictionary<string, int> wordsToNumbers3 = new()
+{
+    ["six"] = 6,
+    ["seven"] = 7
+};
+
+// Checking if a dictionary has a key
+bool contains = wordsToNumbers.ContainsKey("One"); // true
+
+// Checking if a key exists and fetching the value
+bool containsAnother = wordsToNumbers.TryGetValue("three", out int? value);
+
+// Looping over a dictionary
+foreach (KeyValuePair<string, int> item in wordsToNumbers) {
+    Console.WriteLine(item.Key);
+    Console.WriteLine(item.Value);
+}
+```
+
+### Enums
+
+An enum (short for enumeration) in C# is a special value type that lets you define a set of named constants for a variable.
+
+It's useful when a variable should only hold one of a small, fixed number of related values, making code more readable and less error-prone.
+
+```C#
+public enum Direction
+{
+    North,
+    East,
+    South,
+    West
+}
+
+Direction move = Direction.North;
+
+if (move == Direction.West)
+{
+    Console.WriteLine("Heading west!");
+}
+```
+
+The `[Flags]` attribute lets an enum represent a bit field, so you can combine multiple values with bitwise operators.
+
+This is handy when an item can have more than one option at once. E.g a file that can be Read, Written, and/or Executed.
+
+Values should be powers of two (1, 2, 4, 8...) so that each occupies a unique bit.
+
+```C#
+[Flags]
+public enum FileAccessRights
+{
+    None    = 0,
+    Read    = 1,   // 0001
+    Write   = 2,   // 0010
+    Execute = 4,   // 0100
+    Delete  = 8    // 1000
+}
+
+class Program
+{
+    static void Main()
+    {
+        // Combine flags with bitwise OR
+        FileAccessRights userRights = FileAccessRights.Read | FileAccessRights.Write;
+
+        Console.WriteLine(userRights); // Output: Read, Write
+
+        // Check if a flag is set using bitwise AND
+        if ((userRights & FileAccessRights.Write) != 0)
+        {
+            Console.WriteLine("User can write.");
+        }
+
+        // Add another permission
+        userRights |= FileAccessRights.Execute;
+        Console.WriteLine(userRights); // Output: Read, Write, Execute
+
+        // Remove a permission
+        userRights &= ~FileAccessRights.Read;
+        Console.WriteLine(userRights); // Output: Write, Execute
+    }
+}
+```
+
+### Structs
+
+A struct (short for structure) is a value type that groups related data together. Similar to a lightweight class but with some key differences.
+
+Value type: Stored directly on the stack (or inline in containing types) rather than the heap.
+When you assign or pass a struct, you get a copy, not a reference.
+
+No inheritance: A struct can implement interfaces but cannot inherit from another struct or class.
+
+Good for small, immutable data: Ideal for types that represent a simple value, like a point, a color, or a coordinate.
+
+```C#
+public struct Point
+{
+    public int X;
+    public int Y;
+
+    public Point(int x, int y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public void Translate(int dx, int dy)
+    {
+        X += dx;
+        Y += dy;
+    }
+}
+
+// Usage
+Point p1 = new Point(5, 10);
+
+Point p2 = p1;      // copies the value
+
+p2.Translate(2, 3); // modifies only p2
+
+Console.WriteLine(p1.X); // still 5
+
+Console.WriteLine(p2.X); // 7
+```
+
+### Records
+
+A record is a special kind of reference type (introduced in C# 9) designed to make immutable, data-centric objects easy to create and work with. Records are a reference type: Like a class, but focused on holding data rather than complex behavior. Two records are considered equal if all their properties match, even if they're different instances.
+
+Records are immutable by default: You typically declare properties with init accessors so they can be set only during object creation.
+
+These are best to use when representing data models, DTOs, or immutable state.
+
+```C#
+public record Person(string FirstName, string LastName);
+
+var p1 = new Person("Jim", "Bloggs");
+var p2 = new Person("John", "Doe");
+
+Console.WriteLine(p1 == p2); // True (value equality)
+
+// "with" expression to copy with changes
+var p3 = p1 with { LastName = "Byron" };
+```
+
+### Generics
+
+Generics in C# let you write type-safe, reusable code by defining classes, methods, or interfaces with type parameters instead of hard-coding a specific type.
+This means you can create a single implementation, like a list, stack, or utility method that works with any data type while still getting compile-time checking and avoiding casts.
+
+```C#
+// Example on a class
+public class Box<T>
+{
+    private T _item;
+
+    public void Store(T item)
+    {
+        _item = item;
+    }
+
+    public T Retrieve()
+    {
+        return _item;
+    }
+}
+
+var intBox = new Box<int>();
+intBox.Store(42);
+Console.WriteLine(intBox.Retrieve());
+
+var stringBox = new Box<string>();
+stringBox.Store("Hello");
+Console.WriteLine(stringBox.Retrieve());
+
+// Example of a method
+public static T GetFirst<T>(T[] items)
+{
+    return items[0];
+}
+
+// If you define the type, it will be inferred
+int firstInt = GetFirst(new[] { 1, 2, 3 });
+
+// You can also apply the angle brackets just to be more clear
+string firstStr = GetFirst<string>(new[] { "a", "b", "c" });
+```
+
+We can also restrict the generic by using the `where` keyword.
+
+```C#
+// An example where the generic passed in has to implement the IEntity interface
+public interface IEntity
+{
+    int Id { get; }
+}
+
+public class GenericService<T> where T : IEntity
+{
+    public void PrintId(T entity)
+    {
+        Console.WriteLine(entity.Id);
+    }
+}
+
+public class User : IEntity
+{
+    public int Id { get; set; }
+}
+
+
+// We can also implement multiple types to each generic by separating with a comma.
+public class DataStore<T> where T : class, IEntity, new()
+{
+    public T CreateDefault()
+    {
+        return new T(); // Allowed because of 'new()' constraint
+    }
+}
+```
+
+### Tuples
+
+A tuple in C# is a lightweight way to group several values together as a single object without defining a custom class or struct.
+
+It's handy when you want to return or pass around multiple pieces of data that logically belong together but don't justify a separate type.
+
+```C#
+// Returning multiple values from a method
+(string Name, int Age) GetPerson()
+{
+    return ("Ada", 36);
+}
+
+var person = GetPerson();
+
+// Access by name
+Console.WriteLine($"{person.Name} is {person.Age} years old.");
+
+// Or by position
+Console.WriteLine($"{person.Item1} is {person.Item2} years old.");
+
+// Example unpacking the tuple into separate variables
+var (name, age) = GetPerson();
+
+Console.WriteLine($"{name} is {age} years old.");
+```
+
+In C# there are two tuple types you might encounter: the older System.Tuple and the newer System.ValueTuple.
+
+They serve a similar purpose-grouping multiple values, but differ in implementation, syntax, and performance.
+
+System.Tuple<...> (old reference type):
+
+- Reference type (lives on the heap).
+- Introduced in .NET 4.0.
+- Properties are read-only and named Item1, Item2, etc.
+- No deconstruction syntax or friendly field names.
+
+```C#
+Tuple<string,int> t1 = Tuple.Create("Ada", 36);
+Console.WriteLine(t1.Item1); // "Ada"
+Console.WriteLine(t1.Item2); // 36
+```
+
+System.ValueTuple<...> (modern value type):
+
+- Value type (struct) lives on the stack when possible, so it's faster and allocates less memory.
+- Introduced in C# 7.
+- Supports named elements, deconstruction, and concise syntax.
+- Used by default when you write (type1, type2).
+
+```C#
+ValueTuple<string, int> t2 = new("Ada", 36);
+Console.WriteLine(t2.Item1);  // "Ada"
+Console.WriteLine(t2.Item2);   // 36
+
+var (name, age) = t2; 
+Console.WriteLine($"{name} is {age}");
+```
+
+### Strings & Bytes
+
+Strings in C# represent a sequence of characters. When it comes to sending data, computers work with binary. This means we need to `encode` and `decode` between these two types by mapping characters to/from their binary representation.
+
+The most common type you will come across when encoding is `UTF-8`.
+
+```C#
+using System.Text;
+
+// Converting to bytes
+byte[] data = Encoding.UTF8.GetBytes("Hello");
+
+// Converting bytes back to a string
+string text = Encoding.UTF8.GetString(data);
+```
+
+### Streams
+
+Streams in C# allow us to work with data in a more abstract way than just having a byte array.
+
+Streams provide us a common API for working with binary data without having to know exactly how that data is represented behind the scenes.
+
+Streams come from an abtract `Stream` class which then provide data such as
+- The length of the data
+- The current position in the data
+- If we can read or write to the data
+
+One common type of Stream is a `MemoryStream`
+
+```C#
+// Writing and reading back to a memory stream using a StreamWriter
+using var memoryStream = new MemoryStream();
+
+using (var writer = new StreamWriter(memoryStream, Encoding.UTF8, leaveOpen: true))
+{
+    writer.Write("Hello from MemoryStream!");
+}
+
+// Reset position to the start so we can read what we just wrote
+memoryStream.Position = 0;
+
+using var reader = new StreamReader(memoryStream, Encoding.UTF8);
+string text = reader.ReadToEnd();
+
+Console.WriteLine(text);
+
+
+// Reading a byte array through a memory stream
+byte[] rawData = { 0x41, 0x42, 0x43 }; // ASCII for "ABC"
+
+// We can pass it as an argument to the constructor
+using var memoryStream = new MemoryStream(rawData);
+
+// Or we can use the write function
+memoryStream.Write(
+    rawData,
+    offset: 0,
+    count: data.Length
+);
+
+int currentByte;
+// We can loop over each byte individually
+while ((currentByte = memoryStream.ReadByte()) != -1)
+{
+    Console.Write((char)currentByte); // Prints ABC
+}
+
+// Or we can use the Read() method
+byte[] readBuffer = new byte[memoryStream.Length];
+
+int numberOfBytesRead = memoryStream.Read(
+    readBuffer,
+    0,
+    readBuffer.Length
+);
+
+Console.WriteLine(Encoding.UTF8.GetString(readBuffer));
+
+// We can also access properties like this
+Console.WriteLine(memoryStream.Position);
+
+Console.WriteLine(memoryStream.Length);
+
+Console.WriteLine(memoryStream.Capacity);
+```
+
+### Working With Files
+
+In C#, working with files means using the classes in the `System.IO` namespace to create, read, write, copy, move, and delete files.
+
+```C#
+using System;
+using System.IO;
+
+// Checking if a file exists
+string path = @"C:\Temp\example.txt";
+
+if (File.Exists(path))
+{
+    Console.WriteLine("File already exists.");
+}
+else
+{
+    Console.WriteLine("No file found.");
+}
+
+
+// Writing to a file
+File.WriteAllText(path, "Hello World");
+
+// Appending text to a file
+File.AppendAllText(path, "\nAnother line");
+
+// Writing larger or continuous data using a StreamWriter
+using (var writer = new StreamWriter(path))
+{
+    writer.WriteLine("First line");
+    writer.WriteLine("Second line");
+}
+
+// Reading from a file
+string content = File.ReadAllText(path);
+Console.WriteLine(content);
+
+// Reading a file line by line
+string[] lines = File.ReadAllLines(path);
+foreach (var line in lines) {
+    Console.WriteLine(line);
+}
+
+// Reading large files line by line
+using var reader = new StreamReader(path);
+while (!reader.EndOfStream)
+{
+    Console.WriteLine(reader.ReadLine());
+}
+
+// Reading and writing byte data
+byte[] data = { 0x01, 0x02, 0x03 };
+File.WriteAllBytes(path, data);
+
+byte[] readBack = File.ReadAllBytes(path);
+Console.WriteLine($"Read {readBack.Length} bytes");
+
+// More byte data using FileStream
+using var fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.Write);
+byte[] bytes = System.Text.Encoding.UTF8.GetBytes("Streaming example");
+fs.Write(bytes, 0, bytes.Length);
+
+// Copy, moving and deleting
+File.Copy(path, @"C:\Temp\backup.txt", overwrite: true);
+File.Move(path, @"C:\Temp\newname.txt");
+File.Delete(@"C:\Temp\backup.txt");
+
+// Using File.Open() with the FileStream
+// Open the file for writing (create if it doesn't exist)
+using (FileStream fs = File.Open(path, FileMode.OpenOrCreate, FileAccess.Write))
+{
+    byte[] data = System.Text.Encoding.UTF8.GetBytes("Hello from File.Open!");
+
+    fs.Write(data, 0, data.Length);
+}
+
+// Open the file for reading
+using (FileStream fs = File.Open(path, FileMode.Open, FileAccess.Read))
+{
+    byte[] buffer = new byte[fs.Length];
+
+    fs.Read(buffer, 0, buffer.Length);
+
+    string content = System.Text.Encoding.UTF8.GetString(buffer);
+
+    Console.WriteLine(content);
+}
+```
+
+### IDisposable
+
+`IDisposable` is an interface in C# that provides a standard way to release unmanaged resources (like file handles, database connections, network sockets, or memory outside the .NET garbage collector).
+
+```C#
+public interface IDisposable
+{
+    void Dispose();
+}
+```
+
+The typical pattern is to wrap the object in a `using` statement, which ensures `Dispose()` is called automatically:
+
+```C#
+using (var stream = new FileStream("example.txt", FileMode.Open))
+{
+    // Work with the stream
+    byte[] buffer = new byte[stream.Length];
+    stream.Read(buffer, 0, buffer.Length);
+} // Dispose() is called automatically here
+
+// Since C# 8 we also can use the using keyword like this, and will call the dispose method 
+// when it goes out of scope
+using var stream = new FileStream("example.txt", FileMode.Open);
+```
+
+Common uses for IDispoable include:
+- File I/O: `FileStream`, `StreamReader`, `StreamWriter`
+- Database connections: `SqlConnection`, `SqlCommand`
+- Network sockets: `TcpClient`, `NetworkStream`
+- Timers, graphics objects, and other unmanaged resources
+
+### XML & Json
+
+XML and JSON formats are usually used by API's and are formats used to transport data.
+
+XML is a markup language `eXtensible Markup Language`.
+
+For XML, `System.Xml` and `LINQ-to-XML` (System.Xml.Linq) are commonly used.
+
+Example using the built in `System.Xml`:
+
+```C#
+using System;
+using System.Xml;
+
+var doc = new XmlDocument();
+
+// Create the XML declaration
+XmlDeclaration xmlDecl = doc.CreateXmlDeclaration("1.0", "UTF-8", null);
+doc.AppendChild(xmlDecl);
+
+// Create the root element
+XmlElement root = doc.CreateElement("Person");
+doc.AppendChild(root);
+
+// Add child elements
+XmlElement name = doc.CreateElement("Name");
+name.InnerText = "Ada Lovelace";
+root.AppendChild(name);
+
+XmlElement age = doc.CreateElement("Age");
+age.InnerText = "36";
+root.AppendChild(age);
+
+// Save to a file
+doc.Save("person.xml");
+
+Console.WriteLine("XML file created!");
+
+
+//Reading back the xml file
+var doc = new XmlDocument();
+doc.Load("person.xml");
+
+// Select nodes
+XmlNode nameNode = doc.SelectSingleNode("/Person/Name")!;
+XmlNode ageNode = doc.SelectSingleNode("/Person/Age")!;
+
+Console.WriteLine($"{nameNode.InnerText} is {ageNode.InnerText} years old.");
+```
+
+Example using `LINQ-to-XML`:
+
+```C#
+// Using the System.Xml.Linq library
+using System.Xml.Linq;
+
+// Create an XML document
+var xml = new XElement("Person",
+    new XElement("Name", "Ada"),
+    new XElement("Age", 36)
+);
+
+// Save to file
+xml.Save("person.xml");
+
+// Or convert to string
+string xmlString = xml.ToString();
+Console.WriteLine(xmlString);
+
+// reading XML
+var loadedXml = XElement.Load("person.xml");
+string name = loadedXml.Element("Name")!.Value;
+int age = int.Parse(loadedXml.Element("Age")!.Value);
+
+Console.WriteLine($"{name} is {age} years old.");
+```
+
+JSON stands for JavaScript Object Notation.
+
+The recommended way is using System.Text.Json (built-in since .NET Core 3.0) or Newtonsoft.Json.
+
+```C#
+// Define a model
+public record Person(string Name, int Age);
+
+// Serialize to JSON
+using System.Text.Json;
+
+var person = new Person("Ada", 36);
+
+// Convert to JSON string
+string json = JsonSerializer.Serialize(person);
+Console.WriteLine(json);
+
+// Deserialize JSON
+string jsonData = @"{""Name"":""Alan"",""Age"":42}";
+Person p = JsonSerializer.Deserialize<Person>(jsonData)!;
+Console.WriteLine($"{p.Name} is {p.Age} years old.");
+```
+
+### Callbacks & Delegates
+
+A callback is a method that you pass as an argument to another method, which is then called ("called back") at some point during execution. Delegates are the main way to implement callbacks in C#. Callbacks are useful for asynchronous operations, event handling, or customizing behavior in libraries.
+
+Callback example:
+
+```C#
+delegate void OperationCompleted(string result);
+
+class Program
+{
+    static void Main()
+    {
+        // Passing our ShowResult method as an argument 
+        // Notice the parenthesis are missing from the end as 
+        // we don't want to execute the function yet
+        DoWork("Task1", ShowResult);
+    }
+
+    static void DoWork(string taskName, OperationCompleted callback)
+    {
+        
+        Console.WriteLine($"Working on {taskName}...");
+        
+
+        callback($"{taskName} is done!");
+    }
+
+    static void ShowResult(string message)
+    {
+        Console.WriteLine($"Callback received: {message}");
+    }
+}
+```
+
+A delegate in C# is a type-safe object that references a method.
+Think of it as a function pointer in other languages, but safe and managed. Delegates allow you to pass methods as parameters, store them in variables, and invoke them later.
+
+- Delegates define the signature of methods they can point to (return type + parameters).
+- They are type-safe: you can only assign a method that matches the delegate signature.
+- Can point to static or instance methods.
+
+```C#
+// Define a delegate type
+delegate void Notify(string message);
+
+class Program
+{
+    static void Main()
+    {
+        // Assign a method to the delegate
+        Notify notifier = ShowMessage;
+
+        // Invoke the delegate
+        notifier("Hello, world!");
+
+        // We can also use the Invoke() method
+        notifier.Invoke();
+    }
+
+    static void ShowMessage(string msg)
+    {
+        Console.WriteLine(msg);
+    }
+}
+```
+
+We also have two types built in to C# for delegates called `Action` and `Func`
+`Action` represents a method that returns void. `Func` represents a method that returns a value.
+
+`Action` example:
+
+```C#
+using System;
+
+class Program
+{
+    static void Main()
+    {
+        // Action with one parameter
+        Action<string> greet = name => Console.WriteLine($"Hello, {name}!");
+        greet("Ada"); // Output: Hello, Ada!
+
+        // Action with two parameters
+        Action<int, int> add = (x, y) => Console.WriteLine($"{x} + {y} = {x + y}");
+        add(5, 7); // Output: 5 + 7 = 12
+    }
+}
+```
+
+`Func` example:
+
+```C#
+using System;
+
+class Program
+{
+    static void Main()
+    {
+        // Func with two parameters and a return value
+        Func<int, int, int> multiply = (x, y) => x * y;
+        int result = multiply(4, 5);
+        Console.WriteLine(result); // Output: 20
+
+        // Func with no parameters
+        Func<string> getGreeting = () => "Hello from Func!";
+        Console.WriteLine(getGreeting()); // Output: Hello from Func!
+    }
+}
+```
+
+### Lazy Class
+
+In C#, `Lazy<T>` is a generic class in the System namespace that provides lazy initialization.It delays creating an object until the first time you actually need it.
+
+Why to use Lazy:
+
+- Performance: Avoids expensive object creation unless required.
+- Thread Safety: Ensures that initialization happens only once, even if accessed by multiple threads.
+- Clean Code: Handles all the "check if already created" logic for you.
+
+```C#
+Lazy<int> lazyValue = new Lazy<int>(() => {
+    Console.WriteLine("This will only run once");
+    Console.WriteLine("Fixing the max");
+
+    int[] numbers = [35, 20, 30, 40, 50];
+
+    int max = int.MinValue;
+
+    foreach (var number in numbers) {
+        if (number > max ) {
+            max = number;
+        }
+
+        // Simulate an expensive operation
+        Thread.Sleep(1000);
+    }
+
+    Console.WriteLine($"The max value is {max}");
+
+    return max;
+});
+
+// Call the lazy method. To understand what is happening, we can call this multiple times
+// and it will run the calculation once then return instantly after the inital call.
+Console.WriteLine($"The value of lazy is {lazyValue.Value}");
+```
+
+### Events
+
+Events and event handlers in C# are a way we can have delegates be called by "subscribing" them to events. This allows us to create a mechanism where we can notify other components in our systemabout changes they care about.
+
+In the most common scenarios, events use an EventHandler delegate, which accepts a type called `EventArgs`. This delegate signature is:
+
+```C#
+public delegate void EventHandler<TEventArgs>(object sender, TEventArgs e)
+```
+
+The `sender` parameter is the object that raised the event. The `e` parameter is an instance of the EventArgs class.
+
+Example:
+
+```C#
+// Create our own event args
+public class MessageEventArgs : EventArgs
+{
+    public MessageEventArgs(string message)
+    {
+        Mesage = message;
+    }
+
+    public string Message { get; }
+}
+
+// Create an event source
+public class EventSource
+{
+    // This declares the event, and the type of event
+    // but nothing outside this class can raise the event
+    // directly by accessing this.
+    public event EventHandler<MessageEventArgs> SourceChanged;
+
+    public void RaiseEvent(string message)
+    {
+        // SourceChanged can be null if nothing is subscribed
+        SourceChanged?.Invoke(this, new MessageEventArgs(message));
+    }
+}
+
+// Using our event handler
+EventSource source = new();
+
+// We hook up new handlers with +=
+// We can also use -= to remove events
+source.SourceChanged += Source_SourceChanged;
+
+// THis will cause the event to be raised
+source.RaiseEvent("Hello event");
+
+// Event we want to subscribe to the EventSource
+void Source_SourceChanged(object? sender, MessageEventArgs e)
+{
+    Console.WriteLine($"Sender: {sender}");
+    Console.WriteLine($"Message: {e.Message}");
+}
+```
+
+Another example:
+
+```C#
+using System;
+
+public class Timer
+{
+    // Declare the event using EventHandler
+    public event EventHandler? Tick;
+
+    public void Start()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            System.Threading.Thread.Sleep(1000);
+            OnTick();
+        }
+    }
+
+    // Protected virtual method to raise the event
+    protected virtual void OnTick() =>
+        Tick?.Invoke(this, EventArgs.Empty);
+}
+
+public class Program
+{
+    public static void Main()
+    {
+        var timer = new Timer();
+
+        // Subscribe to the event with a lambda
+        timer.Tick += (sender, e) =>
+            Console.WriteLine($"Tick at {DateTime.Now:T}");
+
+        timer.Start();
+    }
+}
+```
+
+One more example handling emails:
+
+```C#
+using System;
+using System.Net;
+using System.Net.Mail;
+
+public class OrderService
+{
+    public event EventHandler<OrderEventArgs>? OrderPlaced;
+
+    public void PlaceOrder(string product, int quantity)
+    {
+        // business logic here ...
+        OrderPlaced?.Invoke(this, new OrderEventArgs(product, quantity));
+    }
+}
+
+public class EmailNotifier
+{
+    public void OnOrderPlaced(object? sender, OrderEventArgs e)
+    {
+        using var client = new SmtpClient("smtp.example.com")
+        {
+            Port = 587,
+            Credentials = new NetworkCredential("username", "password"),
+            EnableSsl = true
+        };
+
+        using var message = new MailMessage(
+            "store@example.com",
+            "customer@example.com",
+            "Order Confirmation",
+            $"Your order for {e.Quantity} × {e.Product} has been received."
+        );
+
+        client.Send(message);   // Send the email
+    }
+}
+
+public record OrderEventArgs(string Product, int Quantity) : EventArgs;
+
+class Program
+{
+    static void Main()
+    {
+        var service = new OrderService();
+        var notifier = new EmailNotifier();
+
+        // Subscribe the email sender to the event
+        service.OrderPlaced += notifier.OnOrderPlaced;
+
+        // Trigger it
+        service.PlaceOrder("Laptop", 2);
+    }
+}
+```
+
+Make sure to unsubscribe from event handlers as keeping them attached can cause memory leaks.
+
+### Threads
+
+A thread is a separate path of execution inside a process. Your program's main method runs on one thread by default. You can create additional threads to run tasks in parallel, allowing your application to stay responsive or perform work concurrently (e.g., processing data while handling user input).
+
+Each thread has its own call stack but shares the process’s memory space with other threads.
+
+```C#
+using System;
+using System.Threading;
+
+class Program
+{
+    static void Main()
+    {
+        // Create a new thread and point it to a method
+        Thread worker = new Thread(DoWork);
+
+        Console.WriteLine("Starting worker thread...");
+        worker.Start(); // Start running DoWork on a new thread
+
+        // Main thread continues immediately
+        Console.WriteLine("Main thread is free to do other work...");
+
+        worker.Join(); // Wait for the worker thread to finish
+        Console.WriteLine("Worker thread has completed.");
+    }
+
+    static void DoWork()
+    {
+        Console.WriteLine("Worker thread is running...");
+        Thread.Sleep(1000); // Simulate time-consuming task
+        Console.WriteLine("Worker thread finished task.");
+    }
+}
+```
+
+You can pass data to a new thread in a few simple ways.
+
+The easiest method is to start the thread with a lambda expression that closes over local variables:
+
+```C#
+using System;
+using System.Threading;
+
+class Program
+{
+    static void Main()
+    {
+        string message = "Hello from worker!";
+        int repeat = 3;
+
+        Thread worker = new Thread(() =>
+        {
+            for (int i = 0; i < repeat; i++)
+            {
+                Console.WriteLine(message);
+                Thread.Sleep(500);
+            }
+        });
+
+        worker.Start();
+        worker.Join();
+    }
+}
+```
+
+### Background Workers
+
+`BackgroundWorker` (from `System.ComponentModel`) is a .NET class that lets you run long-running work on a separate, background thread while safely reporting progress and completion back to the UI thread.
+
+It was popular in Windows Forms and WPF before async/await became common.
+
+Key features:
+
+- Runs work in the background so the UI stays responsive.
+- Supports progress reporting (ProgressChanged) and completion events (RunWorkerCompleted).
+- Automatically marshals event calls back to the UI thread, so you can update controls directly.
+
+For new development, you'd typically use `Task.Run` with `async/await` or `IProgress<T>` instead of BackgroundWorker.
+
+Example using WinForms:
+
+```C#
+using System;
+using System.ComponentModel;
+using System.Windows.Forms;
+
+public class MainForm : Form
+{
+    private readonly BackgroundWorker worker = new() { WorkerReportsProgress = true };
+    private readonly ProgressBar progressBar = new() { Dock = DockStyle.Top };
+    private readonly Button startButton = new() { Text = "Start", Dock = DockStyle.Top };
+
+    public MainForm()
+    {
+        Controls.Add(progressBar);
+        Controls.Add(startButton);
+
+        // Hook up events
+        worker.DoWork += Worker_DoWork;
+        worker.ProgressChanged += Worker_ProgressChanged;
+        worker.RunWorkerCompleted += Worker_RunWorkerCompleted;
+
+        startButton.Click += (_, __) => worker.RunWorkerAsync();
+    }
+
+    private void Worker_DoWork(object? sender, DoWorkEventArgs e)
+    {
+        for (int i = 0; i <= 100; i += 10)
+        {
+            System.Threading.Thread.Sleep(200);
+            worker.ReportProgress(i);
+        }
+    }
+
+    private void Worker_ProgressChanged(object? sender, ProgressChangedEventArgs e) =>
+        progressBar.Value = e.ProgressPercentage;
+
+    private void Worker_RunWorkerCompleted(object? sender, RunWorkerCompletedEventArgs e) =>
+        MessageBox.Show("Work complete!");
+}
+
+// Entry point
+Application.Run(new MainForm());
+```
 
 ## Dotnet CLI Tips And References
 
