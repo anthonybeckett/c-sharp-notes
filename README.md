@@ -143,6 +143,12 @@
     - [MVVM](#mvvm)
     - [MVVM Community Toolkit](#mvvm-community-toolkit) 
     - [iOS Issue](#ios-issue)
+    - [MAUI Libraries](#maui-libraries)
+    - [Creating A Calendar View](#creating-a-calendar-view)
+    - [Memory Management](#memory-management)
+    - [Connecting To Backend Services](#connecting-to-backend-services)
+    - [Local Storage](#local-storage)
+    - [SqLite](#sqlite)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
 - [Unit testing](#unit-testing)
     - [Libraries](#libraries)
@@ -8761,6 +8767,707 @@ public partial class ExampleFix(IDispatcher dispatcher)
             await dispatcher.DispatchAsync(() => users.Add(user));
         }
     }
+}
+```
+
+### MAUI Libraries
+
+Some libraries to help with styling and themeing etc
+
+Uranium UI - https://uraniumui.gh.enisn-projects.io/en/Getting-Started.html
+Reactor UI Maui - https://github.com/adospace/reactorui-maui
+
+### Creating A Calendar View
+
+Let's create our own calendar view. This will give us an insight in to how the MAUI architecture works from making the `UI Framework` element, implementing the `interface` layer then adding the specific `handlers` to our implementation (iOS, Android, Windows, Mac etc).
+
+Lets start with making an interface. In this instance we are just goping to put it in our Views directory but you can place it somewhere like it's own folder in a real project. We need to inherit from `IView`.
+
+```C#
+namespace MauiApp;
+
+public interface ICalendarView : IView
+{
+    DayOfWeek FirstDayOfWeek { get; }
+    DateTimeOffset MinDate { get; }
+    DateTimeOffset MaxDate { get; }
+    DateTimeOffset? SelectedDate { get; set; }
+
+    void OnSelectedDateChanged(DateTimeOffset? selectedDate);
+}
+```
+
+Now we need to create our actual implementation. We will make a concrete class called `CalendarView` and inherit from the `View` class. This will help when we also implement the `ICalendarView` interface so we don't need to implement every method and can just implement and override any we need to change later on along with the ones we defined above.
+
+```C#
+namespace MauiApp;
+
+public class CalendarView : View, ICalendarView
+{
+    // This secWtion creates our bindings to our properties
+    // Take note of the name, we need it to be the same name as what we want to bind to with Property appended
+    public static readonly BindableProperty FirstDayOfWeekProperty = BindableProperty.Create(
+        nameof(FirstDayOfWeek), 
+        returnType: typeof(DayOfWeek), 
+        declaringType: typeof(CalendarView), 
+        defaultValue: default(DayOfWeek)
+    );
+    public static readonly BindableProperty MinDateProperty = BindableProperty.Create(
+        nameof(MinDate),
+        returnType: typeof(DateTimeOffset), 
+        declaringType: typeof(CalendarView), 
+        defaultValue: DateTimeOffset.MinValue
+    );
+    public static readonly BindableProperty MaxDateProperty = BindableProperty.Create(
+        nameof(MaxDate),
+        returnType: typeof(DateTimeOffset), 
+        declaringType: typeof(CalendarView), 
+        defaultValue: DateTimeOffset.MaxValue
+    );
+    public static readonly BindableProperty SelectedDateProperty = BindableProperty.Create(
+        nameof(SelectedDate),
+        returnType: typeof(DateTimeOffset?), 
+        declaringType: typeof(CalendarView), 
+    );
+
+    // Create an event args (class at the bottom)
+    public event EventHandler<SelectedDateChangedEventArgs>? SelectedDateChanged;
+
+    // Now we implement our properties and set the getter to get the value of the binding property above
+    DayOfWeek FirstDayOfWeek 
+    {
+        get => (DayOfWeek)GetValue(FirstDayOfWeekProperty);
+        set => SetValue(FirstDayOfWeekProperty, value);
+    }
+
+    DateTimeOffset MinDate
+    {
+        get => (DateTimeOffset)GetValue(MinDateProperty);
+        set => SetValue(MinDateProperty, value);
+    }
+
+    DateTimeOffset MaxDate
+    {
+        get => (DateTimeOffset)GetValue(MaxDateProperty);
+        set => SetValue(MaxDateProperty, value);
+    }
+
+    DateTimeOffset? SelectedDate
+    {
+        get => (DateTimeOffset?)GetValue(SelectedDateProperty);
+        set => SetValue(SelectedDateProperty, value);
+    }
+
+    // Implementing the method like this hides it from people initializing the class
+    // but we can still attach it to handlers later on.
+    void ICalendarView.OnSelectedDateChanged(DateTimeOffset? selectedDate)
+    {
+        SelectedDateChanged?.Invoke(this, new SelectedDateChangedEventArgs(selectedDate));
+    }
+}
+
+public class SelectedDateChangedEventArgs(DateTimeOffset? selectedDate) : EventArgs
+{
+    public DateTimeOffset? SelectedDate { get; } = selectedDate;
+}
+```
+
+Now lets start the `handlers` by creating a base handler for our Calendar. We can put these in a Handlers directory and call it `CalendarHandler.cs`
+
+```C#
+namespace MauiApp.Handlers;
+
+// We need to make sure this is a partial class as this is how maui uses the different 
+// implementations
+public partial class CalendarHandler
+{
+    // We need two constructors, first one to allow other devs to pass their own PropertyMappers and commandHandlers and a default one for our property and command mappers
+    public CalendarHandler(IPropertyMapper mapper, CommandMapper? commandMapper = null) : base(mapper, commandMapper)
+    {
+
+    }
+
+    public CalendarHandler() : this(PropertyMapper, CommandMapper)
+    {
+
+    }
+
+    // This will throw errors to begin with until we implement the Map... methods
+    public static PropertyMapper<ICalendarView, CalendarHandler> PropertyMapper = new PropertyMapper<ICalendarView, CalendarHandler>(ViewMapper)
+    {
+        [nameof(ICalendarView.FirstDayOfWeek)] = MapFirstDayOfWeek,
+        [nameof(ICalendarView.MinDate)] = MapMinDate,
+        [nameof(ICalendarView.MaxDate)] = MapMaxDate,
+        [nameof(ICalendarView.SelectedDate)] = MapSelectedDate,
+    };
+
+    // This is for mapping commands but we don't have any
+    public static CommandMapper<ICalendarView, CalendarMapper> commandMapper = new(ViewCommandMapper);
+}
+```
+
+Now before we start adding our `.ios.cs` or `.android.cs` files, we need to implement a `Directory.Build.targets` file to be able to handle these different naming conventions. The file looks like this and can be saved as `Directory.Build.targets` in your project.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<Project>
+  <ItemGroup Condition="$(TargetFramework.StartsWith('Xamarin.iOS')) != true AND $(TargetFramework.EndsWith('-ios')) != true">
+    <Compile Remove="**\**\*.ios.cs" />
+    <None Include="**\**\*.ios.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <Compile Remove="**\ios\**\*.cs" />
+    <None Include="**\ios\**\*.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+  <ItemGroup Condition="$(TargetFramework.StartsWith('Xamarin.Mac')) != true AND $(TargetFramework.EndsWith('-maccatalyst')) != true">
+    <Compile Remove="**\*.macos.cs" />
+    <None Include="**\*.macos.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <Compile Remove="**\macos\**\*.cs" />
+    <None Include="**\macos\**\*.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+  <ItemGroup Condition="$(TargetFramework.StartsWith('Xamarin.Mac')) != true AND $(TargetFramework.StartsWith('Xamarin.iOS')) != true AND $(TargetFramework.EndsWith('-ios')) != true AND $(TargetFramework.EndsWith('-maccatalyst')) != true">
+    <Compile Remove="**\*.macios.cs" />
+    <None Include="**\*.macios.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <Compile Remove="**\macios\**\*.cs" />
+    <None Include="**\macios\**\*.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+  <ItemGroup Condition="$(TargetFramework.StartsWith('MonoAndroid')) != true AND $(TargetFramework.EndsWith('-android')) != true ">
+    <Compile Remove="**\**\*.android.cs" />
+    <None Include="**\**\*.android.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <Compile Remove="**\android\**\*.cs" />
+    <None Include="**\android\**\*.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+  <ItemGroup Condition="$(TargetFramework.Contains('-windows')) != true ">
+    <Compile Remove="**\*.windows.cs" />
+    <None Include="**\*.windows.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <Compile Remove="**\windows\**\*.cs" />
+    <None Include="**\windows\**\*.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+  <ItemGroup Condition="$(TargetFramework.Contains('-tizen')) != true ">
+    <Compile Remove="**\*.tizen.cs" />
+    <None Include="**\*.tizen.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <Compile Remove="**\tizen\**\*.cs" />
+    <None Include="**\tizen\**\*.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup> 
+  <ItemGroup Condition="!($(TargetFramework.StartsWith('net')) == true AND $(TargetFramework.EndsWith('.0')) == true AND $(TargetFramework.Contains('-')) != true)"> <!-- e.g net6.0 or net8.0 -->
+    <Compile Remove="**\*.net.cs" />
+    <None Include="**\*.net.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <Compile Remove="**\net\**\*.cs" />
+    <None Include="**\net\**\*.cs" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+</Project>
+```
+
+Now we can start adding our Handlers. Lets start with `iOS`. Create a file called `CalendarHandler.ios.cs` in the Handlers directory. 
+Note: Most of the time, we can name our file `CalendarHandler.macios.cs` and it will work for both Mac and iOS. If we get any errors then we will need to split them out into separate versions.
+
+```C#
+using Foundation;
+using Microsoft.Maui.Handlers;
+using Microsoft.Maui.Platform;
+using ObjCRuntime;
+using UIKit;
+
+namespace MauiApp.Handlers;
+
+public partial class CalendarHandler : ViewHandler<ICalendarView, UICalendarView>, IDisposable
+{
+	UICalendarSelection? _calendarSelection;
+	
+	~CalendarHandler()
+	{
+		Dispose(false);
+	}
+
+	public void Dispose()
+	{
+		Dispose(true);
+		GC.SuppressFinalize(this);
+	}
+	
+	protected override UICalendarView CreatePlatformView()
+	{
+		return new UICalendarView();
+	}
+
+	protected override void ConnectHandler(UICalendarView platformView)
+	{
+		base.ConnectHandler(platformView);
+
+		_calendarSelection = new UICalendarSelectionSingleDate(new CalendarSelectionSingleDateDelegate(VirtualView));
+	}
+	
+	protected virtual void Dispose(bool disposing)
+	{
+		ReleaseUnmanagedResources();
+		
+		if (disposing)
+		{
+			_calendarSelection?.Dispose();
+			_calendarSelection = null;
+		}
+	}
+
+	static void MapSelectedDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		if (handler._calendarSelection is UICalendarSelectionSingleDate calendarSelection)
+		{
+			MapSingleDateSelection(calendarSelection, virtualView);
+		}
+	}
+	
+	static void MapSingleDateSelection(UICalendarSelectionSingleDate calendarSelection, ICalendarView virtualView)
+	{
+		if (virtualView.SelectedDate is null)
+		{
+			calendarSelection.SetSelectedDate(null, true);
+			return;
+		}
+
+		calendarSelection.SetSelectedDate(new NSDateComponents
+		{
+			Day = virtualView.SelectedDate.Value.Day,
+			Month = virtualView.SelectedDate.Value.Month,
+			Year = virtualView.SelectedDate.Value.Year
+		}, true);
+	}
+
+
+    // Whenever the FirstDayOfWeek property changes in your MAUI control (or during initial setup), this mapper runs and:
+    // Reads the .NET property (virtualView.FirstDayOfWeek).
+    // Converts it to the numeric value expected by iOS.
+    // Updates the native iOS calendar’s FirstWeekDay so the displayed calendar starts the week on the correct day.
+	static void MapFirstDayOfWeek(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.Calendar.FirstWeekDay = (nuint)virtualView.FirstDayOfWeek;
+	}
+	
+	static void MapMinDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		SetDateRange(handler, virtualView);
+	}
+	
+	static void MapMaxDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		SetDateRange(handler, virtualView);
+	}
+	
+	static void SetDateRange(CalendarHandler handler, ICalendarView virtualView)
+	{
+		var fromDateComponents = virtualView.MinDate.Date.ToNSDate();
+		var toDateComponents = virtualView.MaxDate.Date.ToNSDate();
+
+		var calendarViewDateRange = new NSDateInterval(fromDateComponents, toDateComponents);
+		handler.PlatformView.AvailableDateRange = calendarViewDateRange;
+	}
+
+	void ReleaseUnmanagedResources()
+	{
+		// Release unmanaged resources here
+	}
+	
+	sealed class CalendarSelectionSingleDateDelegate(ICalendarView calendarView) : IUICalendarSelectionSingleDateDelegate
+	{
+		public NativeHandle Handle { get; }
+		
+		public void Dispose()
+		{
+			
+		}
+
+		public void DidSelectDate(UICalendarSelectionSingleDate calendarSelection, NSDateComponents? date)
+		{
+			calendarSelection.SelectedDate = date;
+			calendarView.SelectedDate = date?.Date.ToDateTime();
+			calendarView.OnSelectedDateChanged(date?.Date.ToDateTime());
+		}
+	}
+}
+```
+
+After this, we can now implement the Android Handler. Create a new file called `CalendarHandler.android.cs`.
+
+```C#
+using Microsoft.Maui.Handlers;
+using Calendar = Android.Widget.CalendarView;
+
+namespace MauiApp.Handlers;
+
+public partial class CalendarHandler : ViewHandler<ICalendarView, Calendar>
+{
+	protected override Calendar CreatePlatformView()
+	{
+		return new Calendar(Context);
+	}
+
+	protected override void ConnectHandler(Calendar platformView)
+	{
+		base.ConnectHandler(platformView);
+		platformView.DateChange += HandleDateChanged;
+	}
+
+	protected override void DisconnectHandler(Calendar platformView)
+	{
+		base.DisconnectHandler(platformView);
+		platformView.DateChange -= HandleDateChanged;
+	}
+
+	static void MapFirstDayOfWeek(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.FirstDayOfWeek = (int)virtualView.FirstDayOfWeek;
+	}
+	
+	static void MapMinDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.MinDate = virtualView.MinDate.ToUnixTimeMilliseconds();
+	}
+
+	static void MapMaxDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.MaxDate = virtualView.MaxDate.ToUnixTimeMilliseconds();
+	}
+	
+	static void MapSelectedDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		if (virtualView.SelectedDate is null)
+		{
+			return;
+		}
+
+		handler.PlatformView.SetDate(virtualView.SelectedDate.Value.ToUnixTimeMilliseconds(), true, true);
+	}
+	
+	void HandleDateChanged(object? sender, Calendar.DateChangeEventArgs e)
+	{
+		PlatformView.DateChange -= HandleDateChanged;
+		
+		VirtualView.SelectedDate = new DateTime(e.Year, e.Month + 1, e.DayOfMonth, 0, 0, 0);
+		VirtualView.OnSelectedDateChanged(VirtualView.SelectedDate);
+		
+		PlatformView.DateChange += HandleDateChanged;
+	}
+}
+```
+
+We can also add another for windows. Add another file called `CalendarHandler.windows.cs`.
+
+```C#
+using Microsoft.Maui.Handlers;
+using Microsoft.UI.Xaml.Controls;
+using Windows.Globalization;
+using Calendar = Microsoft.UI.Xaml.Controls.CalendarView;
+
+namespace MauiApp.Handlers;
+
+public partial class CalendarHandler : ViewHandler<ICalendarView, Calendar>
+{
+	protected override Calendar CreatePlatformView()
+	{
+		return new Calendar();
+	}
+	
+	protected override void ConnectHandler(Calendar platformView)
+	{
+		base.ConnectHandler(platformView);
+		platformView.SelectedDatesChanged += SelectedDatesChanged;
+	}
+	
+	protected override void DisconnectHandler(Calendar platformView)
+	{
+		platformView.SelectedDatesChanged -= SelectedDatesChanged;
+		base.DisconnectHandler(platformView);
+	}
+	
+	static void MapFirstDayOfWeek(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.FirstDayOfWeek = (DayOfWeek)virtualView.FirstDayOfWeek;
+	}
+	
+	static void MapMinDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.MinDate = virtualView.MinDate;
+	}
+	
+	static void MapMaxDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.MaxDate = virtualView.MaxDate;
+	}
+	
+	static void MapSelectedDate(CalendarHandler handler, ICalendarView virtualView)
+	{
+		handler.PlatformView.SelectedDates.Clear();
+		if (virtualView.SelectedDate is not null)
+		{
+			handler.PlatformView.SelectedDates.Add(virtualView.SelectedDate.Value);
+			handler.PlatformView.SetDisplayDate(virtualView.SelectedDate.Value);
+		}
+	}
+	
+	void SelectedDatesChanged(Calendar sender, CalendarViewSelectedDatesChangedEventArgs args)
+	{
+		PlatformView.SelectedDatesChanged -= SelectedDatesChanged;
+		
+		if (args.AddedDates.Count == 0)
+		{
+			VirtualView.SelectedDate = null;
+		}
+
+		if (args.AddedDates.Count > 0)
+		{
+			VirtualView.SelectedDate = args.AddedDates[0];
+		}
+
+		VirtualView.OnSelectedDateChanged(VirtualView.SelectedDate);
+		
+		PlatformView.SelectedDatesChanged += SelectedDatesChanged;
+	}
+}
+```
+
+now we have added all our `Handlers`, we now need to connect them to DotNet Maui. We need to go into our `MauiProgram.cs` and configure maui handlers by adding this.
+
+```C#
+// Usually add this under UseMauiApp()
+builder.ConfigureMauiHandlers(handlers => {
+    handlers.AddHandler<CalendarView, CalendarHandler>();
+})
+```
+
+### Memory Management
+
+Memory management is important in any long-running app, but it's especially critical for .NET MAUI because MAUI apps run on mobile devices and desktops where resources are limited. Phones and tablets have less RAM than a typical server, and the OS will aggressively kill an app that grows too large or leaks memory. More allocations and frequent garbage collections (GC) mean more CPU cycles and power use. MAUI apps host a .NET runtime while also using native iOS/Android/Windows/macOS UI objects. Both managed and native memory must stay in sync.
+
+There are two types of memory referred to in Dotnet Maui and Mobile Development. We have `Managed Memory` and `Native/Unmanaged Memory`.
+
+Managed memory is handled by the .NET GC. It automatically reclaims unreachable objects, so you don't call free() or delete.
+
+Native memory (platform controls, images, file handles, etc.) is not collected by the GC until the managed wrapper is disposed and the finalizer runs.
+
+If you keep references alive (e.g., static fields, event handlers, closures) the GC can't collect them, leading to managed leaks.
+
+If you forget to call `Dispose()` on things like `Stream`, `ImageSource`, or `Handler` objects, the underlying native resources stay allocated.
+
+When it comes to memory leaks in MAUI applications, these tend to be the most common ones:
+
+- Forgetting to unsubscribe from events. Can be prevented using `WeakEventManager`
+- Circular References e.g Referencing a parent view from a child view.
+- Forgetting to `Dispose`. `IDisposible` & `IAsyncDisposable` type classes.
+- Incorrectly scoping anonymous/lambda methods. This causes every variable in an anonymous method to be kept alive.
+
+
+The `WeakEventManager` in .NET MAUI is a handy way to avoid "event subscription leaks."
+It wraps an event so that the subscriber is held by a weak reference.
+Because the publisher does not hold a strong reference, the GC can collect the subscriber when it's no longer used, even if you never manually unsubscribe.
+
+```C#
+// Example of a strong reference which causes a memory leak
+public partial class LeakPage : ContentPage
+{
+    public LeakPage()
+    {
+        InitializeComponent();
+        SomeService.SomeEvent += OnSomeEvent;   // <– strong reference
+    }
+
+    void OnSomeEvent(object sender, EventArgs e)
+    {
+        // ...
+    }
+}
+
+// Using weak event manager on the publisher
+// Service or view model that raises the event
+public class SomeService
+{
+    readonly WeakEventManager _eventManager = new();
+
+    public event EventHandler SomeEvent
+    {
+        add    => _eventManager.AddEventHandler(value);
+        remove => _eventManager.RemoveEventHandler(value);
+    }
+
+    public void Trigger() => _eventManager.HandleEvent(this, EventArgs.Empty, nameof(SomeEvent));
+}
+
+
+// Subscribing from the Page
+public partial class SafePage : ContentPage
+{
+    public SafePage()
+    {
+        InitializeComponent();
+
+        // Normal += syntax works, but it goes through the WeakEventManager internally
+        SomeServiceInstance.SomeEvent += OnSomeEvent;
+    }
+
+    void OnSomeEvent(object sender, EventArgs e)
+    {
+        // Handle event
+    }
+}
+```
+
+Another isseu we may come across is the anonymous lambda methods accessing long living classes which will cause memory leaks. The most simple way of preventing this is to mark our anonymous lambdas as static.
+
+```C#
+// Example code using the static keyword with a lambda. 
+// Now we cannot reference classes outside the method.
+// We can still do crazy things like subscribing to events etc but we should avoid this.
+
+new SearchBar()
+    .Bind(SearchBar.TextProperty,
+        getter: static (ListViewModel vm) => vm.SearchBarText,
+        // ...
+    )
+```
+
+
+### Connecting To Backend Services
+
+A .NET MAUI app is usually the front-end of a larger system. Connecting it to backend services lets you retrieve and update shared data e.g., user profiles, orders, chat messages, or sensor readings stored in a central database. We can also enforce business logic such as complex rules, validation, and workflows which can run on secure servers instead of on every device. We can also syncronise across devices and leverage Authentication, Payments, Push Notifications etc.
+
+Some good libraries to help with this:
+- Refit.HttpClientFactory (Helps with handling JSON encoding and decoding) - https://www.nuget.org/packages/refit.httpclientfactory
+- Microsoft.Extensions.Http.Resilience (Handles network failures) - https://www.nuget.org/packages/Microsoft.Extensions.Http.Resilience
+
+
+When using `Refit.HttpClientFactory`, the best structure layout is to place our API logic in a services directory. We can then call these methods from our ViewModels. (There is some good example code on the nuget link above about setting it up).
+
+`Microsoft.Extensions.Http.Resilience` is very simple to implement if we are using `Refit.HttpClientFactory`. It is a library which retries calling your backend when the first attempt fails and tries again depending on what settings we pass it.
+
+```C#
+// Make a separate class for the options to pass into AddStandardResilienceHandler
+internal sealed class MobileHttpRetryStrategyOptions : HttpRetryStrategyOptions
+{
+    public MobileHttpRetryStrategyOptions()
+    {
+        BackoffType = DelayBackoffType.Exponential;
+        MaxRetryAttempts = 3;
+        UseJitter = true;
+        Delay = TimeSpan.FromSeconds(2);
+    }
+}
+
+builder.Services.AddRefitClient<IApiData>()
+    .ConfigureHttpClient(client => client.BaseAddress = new Uri("https://fakeurlserver.com"))
+    .AddStandardResilienceHandler(options => options.Retry = new MobileHttpRetryStrategyOptions());
+```
+
+
+### Local Storage
+
+A MAUI app often needs to persist small bits of data such as user settings, tokens, flags, or the last screen a user visited. For simple key/value data, `Preferences` (exposed through the `IPreferences` interface) are the easiest option as is it cross platform and is sandboxed to the application which survives restarts.
+
+We can begin by adding `IPreferences` as a singleton in our `MauiProgram.cs`
+
+```C#
+builder.services.AddSingleton<IPreferences>(Preferences.Default);
+```
+
+We can then make a Preference in our servies layer.
+
+```C#
+namespace MauiApp.Services;
+
+public class WelcomePreferences(IPreferences preferences)
+{
+    public bool IsFirstRun
+    {
+        get => preferences.Get(nameof(IsFirstRun), true);
+        set => preferences.Set(nameof(IsFirstRun), value);
+    }
+}
+```
+
+We then add `WelcomePreferences` to our Dependency Injection container and inject it into the page we wish to use it.
+
+We can access it like any other Property in C#.
+
+```C#
+// welcomePreferences being an instance of our injected service
+if (welcomePreferences.IsFirstRun) {
+    // Show some agree terms or something...
+
+    // Set the value to false so this code doesn't show again
+    welcomePreferences.IsFirstRun = false;
+}
+```
+
+### SqLite
+
+We may want to use a local database to store data instead of having everything hosted in the cloud. For this we can use SqLite. To get started, we can install a couple of packages.
+
+Links: 
+- https://www.nuget.org/packages/sqlite-net-pcl/
+- https://www.nuget.org/packages/SQLitePCLRaw.bundle_green
+
+
+```bash
+dotnet add package sqlite-net-pcl
+dotnet add package SQLitePCLRaw.bundle_green
+```
+
+Next, we can make a `Database` directory and create an abstract class called `BaseDatabase`.
+
+```C#
+namespace MauiApp.Database;
+
+abstract class BaseDatabase
+{
+    private readonly Lazy<SQLiteAsyncConnection> _sqliteDatabaseHolder;
+
+    protected BaseDatabase(IFileSystem fileSystem)
+    {
+        var databasePath = Path.Combine(fileSystem.AppDataDirectory, "Database.db3");
+
+        _sqliteDatabaseHolder = new(() => new SQLiteAsyncConnection(databasePath, SQLiteOpenFlags.Create | SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.SharedCache ));
+    }
+
+    SQLiteAsyncConnection DatabaseConnection => _sqliteDatabaseHolder.Value;
+
+    protected async Task<TReturn> Execute<TReturn, TDatabase>(Func<SQLiteAsyncConnection, Task<TReturn>> action, CancellationToken token, int maxRetries = 10)
+	{
+		var databaseConnection = await GetDatabaseConnection<TDatabase>().ConfigureAwait(false);
+
+		var resiliencePipeline = new ResiliencePipelineBuilder<TReturn>()
+			.AddRetry(new RetryStrategyOptions<TReturn>
+			{
+				MaxRetryAttempts = maxRetries,
+				Delay = TimeSpan.FromMilliseconds(2),
+				BackoffType = DelayBackoffType.Exponential
+			}).Build();
+
+		return await resiliencePipeline.ExecuteAsync(async _ => await action(databaseConnection), token);
+	}
+
+    private async ValueTask<SQLiteAsyncConnection> GetDatabaseConnection<T>()
+    {
+        if (DatabaseConnection.TableMappings.All(static x => x.MappedType == typeof(T))) {
+            await DatabaseConnection.EnableWriteAheadLoggingAsync().ConfigureAwait(false);
+            await DatabaseConnection.CreateTableAsync(typeof(T)).ConfigureAwait(false);
+        }
+
+        return DatabaseConnetion;
+    }
+
+}
+
+// Add the IFileSystem to the dependency injection container in MauiProgram.cs
+builder.Services.AddSingleton<IFileSystem>(FileSystem.Current);
+```
+
+We can then implement it with something like this:
+
+```C#
+namespace MauiApp.Database;
+
+class LibraryModelDatabase(IFileSystem fileSystem) : BaseDatabase(fileSystem)
+{
+	public Task<List<LibraryModel>> GetLibraries(CancellationToken token) => 
+		Execute<List<LibraryModel>, LibraryModel>(databaseConnection => databaseConnection.Table<LibraryModel>().ToListAsync(), token);
+
+	public Task InsertAllLibraries(IEnumerable<LibraryModel> libraryModels, CancellationToken token) =>
+		Execute<int, LibraryModel>(databaseConnection => databaseConnection.InsertAllAsync(libraryModels), token);
 }
 ```
 
