@@ -149,6 +149,10 @@
     - [Connecting To Backend Services](#connecting-to-backend-services)
     - [Local Storage](#local-storage)
     - [SqLite](#sqlite)
+    - [GraphQL](#graphql)
+    - [GraphQL in MAUI](#graphql-in-maui)
+    - [Cross Platform Services](#cross-platform-services)
+    - [Unit Testing In Maui](#unit-testing-in-maui)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
 - [Unit testing](#unit-testing)
     - [Libraries](#libraries)
@@ -8774,7 +8778,7 @@ public partial class ExampleFix(IDispatcher dispatcher)
 
 Some libraries to help with styling and themeing etc
 
-Uranium UI - https://uraniumui.gh.enisn-projects.io/en/Getting-Started.html
+Uranium UI - https://uraniumui.gh.enisn-projects.io/en/Getting-Started.html  
 Reactor UI Maui - https://github.com/adospace/reactorui-maui
 
 ### Creating A Calendar View
@@ -9264,7 +9268,7 @@ public partial class LeakPage : ContentPage
     public LeakPage()
     {
         InitializeComponent();
-        SomeService.SomeEvent += OnSomeEvent;   // <– strong reference
+        SomeService.SomeEvent += OnSomeEvent;   // <- strong reference
     }
 
     void OnSomeEvent(object sender, EventArgs e)
@@ -9470,6 +9474,436 @@ class LibraryModelDatabase(IFileSystem fileSystem) : BaseDatabase(fileSystem)
 		Execute<int, LibraryModel>(databaseConnection => databaseConnection.InsertAllAsync(libraryModels), token);
 }
 ```
+
+### GraphQL
+
+GraphQL is a query language for APIs and a runtime for executing those queries on your server.
+Instead of having many REST endpoints, you expose a single endpoint that lets the client ask exactly for the data it needs. No more, no less.
+
+GraphQL is also self documenting. Most tools will provide a docs section of what data is available. Any data with a `!` is non nullable. All GraphQL url's are `POST` requests.
+
+When using a tool like Postman, we can set the query or mutation in the body section as raw json.
+
+Example of schema on the server side:
+
+```graphql
+type Book {
+  id: ID!
+  title: String!
+  author: Author!
+}
+
+type Author {
+  id: ID!
+  name: String!
+}
+
+type Query {
+  book(id: ID!): Book
+  books: [Book]
+}
+```
+
+Example of a query to fetch data
+
+```graphql
+query GetBook {
+  book(id: "1") {
+    title
+    author {
+      name
+    }
+  }
+}
+```
+
+In GraphQL, a `mutation` is how the client requests to change data (create, update, delete).
+It looks like a query but is defined under a Mutation root type.
+
+Extending the schema on the server:
+
+```graphql
+type Mutation {
+  addBook(title: String!, authorId: ID!): Book
+}
+```
+
+Updating the data through a mutation:
+
+```graphql
+mutation AddBook {
+  addBook(title: "The Silmarillion", authorId: "2") {
+    id
+    title
+    author {
+      name
+    }
+  }
+}
+```
+
+### GraphQL in MAUI
+
+To get started with GraphQL in Dotnet MAUI, we need to install the folowing package.
+
+StrawberryShake.Maui - https://www.nuget.org/packages/StrawberryShake.Maui/   
+
+```bash
+dotnet add package StrawberryShake.Maui
+```
+
+We can then follow the docs here - https://chillicream.com/docs/strawberryshake/v15/get-started/console  
+
+Once it is set up, we should have some new files appear in our Maui app.
+
+- `.graphqlrc.json` - Settings file for StrawberryShake
+- `schema.graphql` - The schema from our GraphQL backend.
+- `schema.extentions.graphql` - Additional information about the schema.
+
+Now we can make our GraphQL file like `GraphQL/GetBook.graphql`:
+
+```graphql
+query GetBook($id: ID!) {
+  book(id: $id) {
+    id
+    title
+    author {
+      name
+    }
+  }
+}
+```
+
+We now just need to run the following in our terminal 
+
+```bash
+dotnet graphql generate
+```  
+
+We then need to register this in our `MauiProgram.cs`
+
+```c#
+builder.Services
+    .AddBookClient()
+    .ConfigureHttpClient(static client => client.BaseAddress = new Uri("https://your-graphql-endpoint.com/graphql"));
+
+// If we want to add resilience 
+builder.Services
+    .AddBookClient()
+    .ConfigureHttpClient(
+        static client => client.BaseAddress = new Uri("https://your-graphql-endpoint.com/graphql"),
+        static builder => builder.AddStandardResilienceHandler(options => options.Retry = new MobileHttpRetryStrategyOptions())
+    );
+```
+
+We can now use our GraphQL endpoint like this:
+
+```C#
+using StrawberryShake;
+using System.Threading.Tasks;
+
+public interface IBookService
+{
+    Task<BookDto?> GetBookAsync(string id);
+}
+
+public class BookService : IBookService
+{
+    private readonly IGetBookClient _client;
+
+    public BookService(IGetBookClient client)
+    {
+        _client = client;
+    }
+
+    public async Task<BookDto?> GetBookAsync(string id)
+    {
+        var result = await _client.GetBook.ExecuteAsync(id).ConfigureAwait(false);
+
+        result.EnsureNoErrors();
+
+        if (!result.IsSuccessResult() || result.Data?.Book is null)
+            return null;
+
+        // Map generated GraphQL type to your own DTO
+        var book = result.Data.Book;
+
+        return new BookDto(
+            book.Id,
+            book.Title,
+            book.Author.Name
+        );
+    }
+
+    public async IAsyncEnumerable<BookDto> GetAllBooksAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var result = await _client.GetBooks.ExecuteAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!result.IsSuccessResult() || result.Data?.Books is null)
+            yield break;
+
+        foreach (var book in result.Data.Books)
+        {
+            yield return new BookDto(
+                book.Id,
+                book.Title,
+                book.Author.Name);
+        }
+    }
+}
+
+// Simple data transfer object for the app's domain
+public record BookDto(string Id, string Title, string AuthorName);
+```
+
+Don't forget to register this service in your dependency injection container.
+
+In the example of getting all the books, we need to use an await foreach like this:
+
+```C#
+public class BooksViewModel
+{
+    private readonly IBookService _bookService;
+
+    public BooksViewModel(IBookService bookService)
+    {
+        _bookService = bookService;
+    }
+
+    public async Task LoadBooksAsync()
+    {
+        await foreach (var book in _bookService.GetAllBooksAsync().ConfigureAwait(false))
+        {
+            Console.WriteLine($"{book.Title} by {book.AuthorName}");
+        }
+    }
+}
+```
+
+### Cross Platform Services
+
+one of the big benefits of .NET MAUI Essentials is that it gives you a set of cross-platform APIs (services) that abstract away platform differences, so you write code once and it runs on Android, iOS, macOS, and Windows.
+
+Sometimes we need to add additional code to access some of these so check the docs to make sure they are implemented correctly.
+
+Here's a rundown of the most commonly used ones:
+
+Device & App Info:
+
+- DeviceInfo - device model, manufacturer, OS version, idiom (phone, tablet, desktop).
+- AppInfo - app name, package identifier, version, build number, open app settings.
+- VersionTracking - track app version/first run, check if upgraded/downgraded.
+
+Connectivity & Communication:
+
+- Connectivity - check internet/network access type.
+- NetworkAccess / ConnectionProfiles - details about Wi-Fi, cellular, etc.
+- Browser - open system browser or in-app web view.
+- PhoneDialer - start a phone call.
+- Sms - compose and send SMS.
+- Email - compose and send email.
+
+Storage & Preferences:
+
+- Preferences / IPreferences - simple key/value storage for settings.
+- SecureStorage - encrypted storage for sensitive data (tokens, passwords).
+- FileSystem - access app cache/data folders.
+- Launcher - open another app or file with default handler.
+- Clipboard - copy/paste text.
+
+Sensors & Device Features:
+
+- Geolocation - get current location (lat/lon).
+- Geocoding - convert addresses <-> coordinates.
+- Map - open maps at a location.
+- Accelerometer - detect acceleration (tilt, shake).
+- Compass - get magnetic heading.
+- Gyroscope - detect device rotation.
+- Magnetometer - raw magnetic field values.
+- OrientationSensor - 3D orientation of device.
+- Barometer - air pressure.
+- Battery - charge level, state, and power source.
+- Flashlight - toggle torch on/off.
+- Vibration - vibrate the device.
+- HapticFeedback - trigger platform haptics.
+
+UI & Display: 
+
+- MainThread - ensure code runs on UI thread.
+- DeviceDisplay - screen metrics, keep screen awake.
+- Screenshot - capture a screenshot.
+- Share - share text/files to other apps.
+- TextToSpeech - speak text with system TTS engine.
+- SpeechRecognizer (preview/3rd party) - convert speech to text.
+
+Security & Permissions:
+
+- Permissions - request/check runtime permissions (location, camera, etc.).
+- SecureStorage - mentioned above, secure key/value store.
+
+Miscellaneous:
+
+- Dispatcher / IDispatcher - scheduling work on UI/background thread.
+- Launcher - launch URIs or apps.
+- Connectivity - check online/offline state.
+
+Example usage:
+
+```C#
+// Get device info
+var model = DeviceInfo.Model;
+var version = DeviceInfo.VersionString;
+
+// Save and read a preference
+Preferences.Set("theme", "dark");
+var theme = Preferences.Get("theme", "light");
+
+// Get location
+var location = await Geolocation.GetLastKnownLocationAsync();
+
+// Copy to clipboard
+await Clipboard.SetTextAsync("Hello MAUI!");
+
+// Open browser
+await Browser.OpenAsync("https://dotnet.microsoft.com");
+```
+
+### Unit Testing In Maui
+
+Unit testing is pretty similar to how we do it in most Dotnet projects. The unit tests will mainly cover logic in our `ViewModels` and Services.
+
+After creating a new unit test project, you may have an issue trying to reference the Maui application in the testing project. This is because by default, there is no `net9.0;` target framework set up in our Maui's .csproj file. We can open this file and add it to our `<TargetFrameworks>` tag, separating each one with a semi colon.
+
+If we have made any of our own `Handlers` which target different frameworks which normally look like `MyFeature.ios.cs` then we will get build errors when adding the target framework above. We will also need to create an implementation under the name `MyFeature.net.cs`. We can then add any methods like `createPlatformView()` and throw a `NotSupportedException()`. This will only happen if we have a condition inside our `Directory.Build.targets` file mentioned in the Creating A Calendar View section.
+
+If we get any issues about the program not containing a static Main method, we can add a `Program.net.cs` file and add the standard Main method to it.
+
+```C#
+namespace MauiApp;
+
+public class Program
+{
+    public static void Main(string[] args)
+    {
+
+    }
+}
+```
+
+A good place to start when setting up our unit tests is creating a `BaseTest` abstract class which all our tests will inherit from.
+
+A basic starting example using NUnit:
+
+```C#
+namespace MauiApp.UnitTests.Tests;
+
+abstract class BaseTest
+{
+    [TearDown]
+    public virtual Task TearDown()
+    {
+        return Task.CompletedTask;
+    }
+
+    [SetUp]
+    public virtual Task SetUp()
+    {
+        return Task.CompletedTask;
+    }
+}
+```
+
+This is an example of mocking the `IPreferences` which stores data locally through Key/Value pairs. We can implement the interface into our mock then use a dictionary to set, get, clear etc.
+
+```C#
+using Newtonsoft.Json;
+
+namespace MauiApp.UnitTests.Mocks;
+
+class MockPreferences : IPreferences
+{
+	readonly Dictionary<string, string> _dictionary = new();
+	
+	public bool ContainsKey(string key, string? sharedName = null)
+	{
+		return _dictionary.ContainsKey(key);
+	}
+
+	public void Remove(string key, string? sharedName = null)
+	{
+		_dictionary.Remove(key);
+	}
+
+	public void Clear(string? sharedName = null)
+	{
+		_dictionary.Clear();
+	}
+
+	public void Set<T>(string key, T value, string? sharedName = null)
+	{
+		var serializedValue = JsonConvert.SerializeObject(value);
+		
+		if (ContainsKey(key))
+		{
+			_dictionary[key] = serializedValue;
+		}
+		else
+		{
+			_dictionary.Add(key, serializedValue);	
+		}
+	}
+
+	public T Get<T>(string key, T defaultValue, string? sharedName = null)
+	{
+		if (ContainsKey(key))
+		{
+			var serializedValue = _dictionary[key];
+			return JsonConvert.DeserializeObject<T>(serializedValue) ?? throw new InvalidOperationException("Key does not exist");
+		}
+
+		return defaultValue;
+	}
+}
+```
+
+We can also create our own `ServiceCollection` to have dependency injection in our testing project.
+
+```C#
+using MauiApp.Database;
+using MauiApp.Services;
+using MauiApp.UnitTests.Mocks;
+
+namespace MauiApp.UnitTests;
+
+class Services
+{
+	static readonly Lazy<IServiceProvider> _serviceProviderHolder = new(CreateCollection);
+
+	public static IServiceProvider Provider => _serviceProviderHolder.Value;
+	
+	static IServiceProvider CreateCollection()
+	{
+		var container = new ServiceCollection();
+		
+		// Services
+		container.AddSingleton<IPreferences, MockPreferences>();
+		container.AddSingleton<MauiGraphQLService>();
+		
+		// ViewModels
+		container.AddTransient<ListViewModel>();
+
+		return container.BuildServiceProvider();
+	}
+}
+```
+
+When we now need to implement something, we can initialize it like this in our test.
+
+```C#
+var preferences = Services.Provider.GetRequiredService<IPreferences>();
+```
+
 
 ## Optimising MSSQL Queries
 
