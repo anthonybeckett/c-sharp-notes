@@ -154,8 +154,20 @@
     - [Cross Platform Services](#cross-platform-services)
     - [Unit Testing In Maui](#unit-testing-in-maui)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
-- [Unit testing](#unit-testing)
+- [Unit Testing](#unit-testing)
     - [Libraries](#libraries)
+    - [Test Class Lifecycle](#test-class-lifecycle)
+    - [Parameterization](#parameterization)
+    - [Exposing Internals To Tests](#exposing-internals-to-tests)
+    - [Fakes](#fakes)
+    - [Mocking](#mocking)
+    - [Testing Static And Extension Methods](#testing-static-and-extension-methods)
+    - [Class Fixtures](#class-fixtures)
+    - [Collection Fixtures](#collection-fixtures)
+    - [Parallelization](#parallelization)
+    - [Advanced Parameterization](#advanced-parameterization)
+    - [Testing DateTime](#testing-datetime)
+    - [Code Coverage]()
 - [Integration Testing](#integration-testing)
     - [Setup Notes](#setup-notes)
 - [CI/CD](#cicd)
@@ -9940,11 +9952,17 @@ ON YourTable (Column1);
 ```
 
 
-## Unit testing
+## Unit Testing
 
 To setup, right click the solution and Add -> New Project
 
-Select the test suite to use. Recommend XUnit as it's cross platform.
+Select the test suite to use. Recommend XUnit as it's cross platform. It was also built by the same people who made NUnit but wuilt with the knowledge learnt from that library.
+
+When naming the project, a standard way is to call it your `ProjectName.Tests.Unit`.
+
+When naming the class, a good way of naming these is `ClassTest`.
+
+When naming each test, a good way of naming these is following method name -> should -> when approach. E.g. `Add_ShouldAddTwoNumbers_WhenTwoNumbersAreIntegers()`
 
 XUnit tests need a `[Fact]` attribute above the methods.
 
@@ -9981,6 +9999,748 @@ namespace UnitTestExample
 Some nice to have libraries to make testing a little easier.
 
 Shouldly - https://docs.shouldly.org/
+
+### Test Class Lifecycle
+
+xUnit's design goal is test isolation. Each new instance is created per test method. This means the constructor and any initialised variables are run before every test. This means we do not need a `Setup` and `TearDown` method like in most testing suites such as NUnit.
+
+For each discovered test method:
+
+- Create the test class instance.
+- Run the constructor.
+- Run any async initializers if using `IAsyncLifetime.InitializeAsync()`.
+- Invoke the test method (await if async).
+- Call `Dispose` or `IAsyncLifetime.DisposeAsync()` if implemented.
+- Dispose the instance.
+
+This happens independently for every test method.
+
+Because we don't have the Setup and Teardown methods, we can use the Constructor and Dispose methods.
+
+```C#
+// Normal example
+public class ExampleTests : IDisposable
+{
+    private readonly ITestOutputHelper _outputHelper;
+
+    // Example of Setup in xUnit
+    public ExampleTests(ITestOutputHelper outputHelper)
+    {
+        _outputHelper = outputHelper;
+        _outputHelper.WriteLine("Hello from the constructor");
+    }
+
+    // Example of teardown in xUnit
+    public void Dispose()
+    {
+        _outputHelper.WriteLine("Hello from the dispose method");
+    }
+}
+
+// Async example
+public class ExampleTests : IAsyncLifetime
+{
+    private readonly ITestOutputHelper _outputHelper;
+
+    
+    public ExampleTests(ITestOutputHelper outputHelper)
+    {
+        _outputHelper = outputHelper;
+    }
+
+    public async Task InitializeAsync()
+    {
+        _outputHelper.WriteLine("Hello from the initialize method");
+    }
+
+    
+    public async Task DisposeAsync()
+    {
+        _outputHelper.WriteLine("Hello from the dispose method");
+    }
+}
+```
+
+### Parameterization
+
+`Parameterization` in xUnit lets you run the same test method multiple times with different input values. This is great for avoiding copy-paste tests. it works by using the `[Theory]` attribute instead of `[Fact]`. We then provide the data with attributes like `[InlineData]`, `[MemberData]`, or `[ClassData]`. xUnit creates a new instance of the test class for each data row and runs the method with those parameters.
+
+```C#
+using Xunit;
+
+public class MathTests
+{
+    [Theory]
+    [InlineData(2, 4)]
+    [InlineData(3, 9)]
+    [InlineData(4, 16)]
+    public void Squares_ShouldReturnExpectedResult(int input, int expected)
+    {
+        int result = input * input;
+
+        Assert.Equal(expected, result);
+    }
+}
+```  
+
+
+### Exposing Internals To Tests
+
+If you need to test internal based classes, methods or properties then we can change the csproj file to make internals visible to our test project. Open the projects `.csproj` file and add the following.
+
+```xml
+<ItemGroup>
+    <InternalsVisibleTo Include="TestingProject.Tests.Unit">
+</ItemGroup>
+```
+
+### Fakes
+
+When we are using interfaces and need to fake a class being injected into a Service class etc, we can create a fake instance of a class implementing the interface we need to inject with and then return any expected output. This only works when we need to fake small bits of code and doesn't scale well so you would usually use Mocking.
+
+We can make a fake User Repository instance something like this
+
+```C#
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using UnderstandingDependencies.Api.Models;
+using UnderstandingDependencies.Api.Repositories;
+
+namespace UnderstandingDependencies.Api.Tests.Unit;
+
+public class FakeUserRepository : IUserRepository
+{
+    public Task<IEnumerable<User>> GetAllAsync()
+    {
+        return Task.FromResult(Enumerable.Empty<User>());
+    }
+}
+
+public class FakeUserRepositoryWithUsers : IUserRepository
+{
+    public Task<IEnumerable<User>> GetAllAsync()
+    {
+        return Task.FromResult<IEnumerable<User>>(new []
+        {
+            new User
+            {
+                Id = Guid.NewGuid(),
+                FullName = "Test User"
+            }
+        });
+    }
+}
+```
+
+We can now use these classes like this
+
+```C#
+using System;
+using System.Threading.Tasks;
+using FluentAssertions;
+using NSubstitute;
+using UnderstandingDependencies.Api.Models;
+using UnderstandingDependencies.Api.Repositories;
+using UnderstandingDependencies.Api.Services;
+using Xunit;
+
+namespace UnderstandingDependencies.Api.Tests.Unit;
+
+public class UserServiceTests
+{
+    private readonly UserService _sut;
+    private readonly FakeUserRepository _userRepository = new();
+
+    public UserServiceTests()
+    {
+        _sut = new UserService(_userRepository);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_ShouldReturnEmptyList_WhenNoUsersExist()
+    {
+        // Arrange
+        _userRepository.GetAllAsync().Returns(Array.Empty<User>());
+
+        // Act
+        var users = await _sut.GetAllAsync();
+
+        // Assert
+        users.Should().BeEmpty();
+    }
+}
+```
+
+### Mocking
+
+Mocking is a testing technique used to isolate the code under test by replacing its real dependencies with lightweight, controllable stand-ins. In C# unit tests, this is common when your class depends on external services such as databases, HTTP calls, file I/O, that you don't want to hit during a fast, repeatable test run.
+
+two libraries we can use are `Moq` and `NSubstitute`.  
+
+Example using a User Repository
+
+```C#
+public interface IUserRepository
+{
+    Task<User> GetUserAsync(int id);
+}
+
+public class UserService
+{
+    private readonly IUserRepository _repository;
+    public UserService(IUserRepository repository) => _repository = repository;
+
+    public async Task<string> GetUserNameAsync(int id)
+    {
+        var user = await _repository.GetUserAsync(id);
+        return user?.Name ?? "Unknown";
+    }
+}
+
+public record User(int Id, string Name);
+```
+
+Now we can mock this and test what we need to in the service.
+
+```C#
+using System.Threading.Tasks;
+using NSubstitute;
+using Xunit;
+
+public class UserServiceTests
+{
+    [Fact]
+    public async Task GetUserNameAsync_ReturnsName_WhenUserExists()
+    {
+        // Arrange: create a substitute for the repository
+        var repo = Substitute.For<IUserRepository>();
+
+        // Configure the fake's behavior
+        repo.GetUserAsync(42).Returns(new User(42, "Alice"));
+
+        var service = new UserService(repo);
+
+        // Act
+        var result = await service.GetUserNameAsync(42);
+
+        // Assert: check the return value
+        Assert.Equal("Alice", result);
+
+        // Verify the method was called exactly once with argument 42
+        await repo.Received(1).GetUserAsync(42);
+    }
+
+    [Fact]
+    public async Task GetUserNameAsync_ReturnsUnknown_WhenUserMissing()
+    {
+        var repo = Substitute.For<IUserRepository>();
+        // No setup means it returns default (null) for User
+
+        var service = new UserService(repo);
+
+        var result = await service.GetUserNameAsync(99);
+
+        Assert.Equal("Unknown", result);
+        await repo.Received(1).GetUserAsync(99);
+    }
+}
+```
+
+### Testing Static And Extension Methods
+
+Sometimes, we may want to cover testing certain functionality like logging, but may use extension or static implementations. This makes it very hard to test. One way we can get around this is using the adapter pattern.
+
+Let's say we are using the `ILogger`. Lets make an interface and adapter and use them in a test instead.
+
+```C#
+namespace Users.Api.Logging;
+
+public interface ILoggerAdapter<TType>
+{
+    void LogInformation(string? message, params object?[] args);
+
+    void LogError(Exception? exception, string? message, params object?[] args);
+}
+```
+
+```C#
+namespace Users.Api.Logging;
+
+public class LoggerAdapter<TType> : ILoggerAdapter<TType>
+{
+    private readonly ILogger<TType> _logger;
+
+    public LoggerAdapter(ILogger<TType> logger)
+    {
+        _logger = logger;
+    }
+
+    public void LogInformation(string? message, params object?[] args)
+    {
+        _logger.LogInformation(message, args);
+    }
+
+    public void LogError(Exception? exception, string? message, params object?[] args)
+    {
+        _logger.LogError(exception, message, args);
+    }
+}
+```
+
+Now we can test it using our adapter class instead
+
+```C#
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using Castle.Core.Logging;
+using FluentAssertions;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
+using NSubstitute;
+using NSubstitute.ExceptionExtensions;
+using NSubstitute.ReturnsExtensions;
+using Users.Api.Logging;
+using Users.Api.Models;
+using Users.Api.Repositories;
+using Users.Api.Services;
+using Xunit;
+
+namespace Users.Api.Tests.Unit;
+
+public class UserServiceTests
+{
+    private readonly UserService _sut;
+    private readonly IUserRepository _userRepository = Substitute.For<IUserRepository>();
+    private readonly ILoggerAdapter<UserService> _logger = Substitute.For<ILoggerAdapter<UserService>>();
+
+    public UserServiceTests()
+    {
+        _sut = new UserService(_userRepository, _logger);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_ShouldLogMessages_WhenInvoked()
+    {
+        // Arrange
+        _userRepository.GetAllAsync().Returns(Enumerable.Empty<User>());
+
+        // Act
+        await _sut.GetAllAsync();
+
+        // Assert
+        _logger.Received(1).LogInformation(Arg.Is("Retrieving all users"));
+        _logger.Received(1).LogInformation(Arg.Is("All users retrieved in {0}ms"), Arg.Any<long>());
+    }
+
+    [Fact]
+    public async Task GetAllAsync_ShouldLogMessageAndException_WhenExceptionIsThrown()
+    {
+        // Arrange
+        var sqliteException = new SqliteException("Something went wrong", 500);
+        _userRepository.GetAllAsync()
+            .Throws(sqliteException);
+
+        // Act
+        var requestAction = async () => await _sut.GetAllAsync();
+
+        // Assert
+        await requestAction.Should()
+            .ThrowAsync<SqliteException>().WithMessage("Something went wrong");
+        _logger.Received(1).LogError(Arg.Is(sqliteException), Arg.Is("Something went wrong while retrieving all users"));
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_ShouldLogMessages_WhenInvoked()
+    {
+        // Arrange
+        var userId = Guid.NewGuid();
+        _userRepository.GetByIdAsync(userId).ReturnsNull();
+
+        // Act
+        await _sut.GetByIdAsync(userId);
+
+        // Assert
+        _logger.Received(1).LogInformation(Arg.Is("Retrieving user with id: {0}"),
+            Arg.Is(userId));
+        _logger.Received(1).LogInformation(Arg.Is("User with id {0} retrieved in {1}ms"),
+            Arg.Is(userId), Arg.Any<long>());
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_ShouldLogMessageAndException_WhenExceptionIsThrown()
+    {
+        // Arrange
+        var userId = Guid.NewGuid();
+        var sqliteException = new SqliteException("Something went wrong", 500);
+        _userRepository.GetByIdAsync(userId)
+            .Throws(sqliteException);
+
+        // Act
+        var requestAction = async () => await _sut.GetByIdAsync(userId);
+
+        // Assert
+        await requestAction.Should()
+            .ThrowAsync<SqliteException>().WithMessage("Something went wrong");
+        _logger.Received(1).LogError(Arg.Is(sqliteException),
+            Arg.Is("Something went wrong while retrieving user with id {0}"),
+            Arg.Is(userId));
+    }
+}
+```
+
+### Class Fixtures
+
+Fixtures let you share setup and cleanup code across multiple tests in the same class. Instead of re-creating expensive resources (e.g., a database connection, HTTP client, service) for every test, you build them once and reuse them. In unit tests, ther could be a scenario where you have a service that depends on some expensive setup (like configuration or a fake in-memory database). Instead of setting that up for every test, you put it in a fixture.
+
+First we need to make a fixture class
+
+```C#
+using System;
+
+public class CalculatorFixture : IDisposable
+{
+    public Calculator Calculator { get; private set; }
+
+    public CalculatorFixture()
+    {
+        // Setup: runs ONCE for the whole test class
+        Calculator = new Calculator();
+        Console.WriteLine("Calculator created!");
+    }
+
+    public void Dispose()
+    {
+        // Cleanup: runs ONCE after all tests finish
+        Console.WriteLine("Calculator disposed!");
+    }
+}
+```
+
+We now implement this using the `IClassFixture` interface using our fixture as the type in the generic then injecting it through our constructor.
+
+```C#
+using Xunit;
+
+public class CalculatorTests : IClassFixture<CalculatorFixture>
+{
+    private readonly CalculatorFixture _fixture;
+
+    public CalculatorTests(CalculatorFixture fixture)
+    {
+        _fixture = fixture; // shared across all tests
+    }
+
+    [Fact]
+    public void Add_WorksCorrectly()
+    {
+        var result = _fixture.Calculator.Add(2, 3);
+        Assert.Equal(5, result);
+    }
+
+    [Fact]
+    public void Multiply_WorksCorrectly()
+    {
+        var result = _fixture.Calculator.Multiply(4, 5);
+        Assert.Equal(20, result);
+    }
+}
+```
+
+### Collection Fixtures
+
+Collection fixtures are the next step up from class fixtures. They let you share the same fixture across multiple test classes.
+
+First lets make the fixture (will pretend to use a database in this example).
+
+```C#
+using System;
+
+public class DatabaseFixture : IDisposable
+{
+    public string ConnectionString { get; private set; }
+
+    public DatabaseFixture()
+    {
+        ConnectionString = "Server=localhost;Database=TestDb;User=sa;Password=Pass@word1;";
+        Console.WriteLine("Database initialized!");
+    }
+
+    public void Dispose()
+    {
+        Console.WriteLine("Database cleaned up!");
+    }
+}
+```
+
+We now make a collection implementing the `ICollectionFixture` interface
+
+```C#
+using Xunit;
+
+[CollectionDefinition("Database collection")]
+public class DatabaseCollection : ICollectionFixture<DatabaseFixture>
+{
+    // This class has no code.
+    // Its purpose is simply to be the anchor for the [CollectionDefinition].
+}
+```
+
+We can now apply `[Collection("Name")]` to any test classes that need the shared fixture.
+
+```C#
+using Xunit;
+
+[Collection("Database collection")]
+public class UserRepositoryTests
+{
+    private readonly DatabaseFixture _fixture;
+
+    public UserRepositoryTests(DatabaseFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
+    [Fact]
+    public void CanUseDatabaseConnection()
+    {
+        Assert.Contains("Database=TestDb", _fixture.ConnectionString);
+    }
+}
+```
+
+### Parallelization
+
+By default, tests run in Parallel but grouped by Class collections. For most scenarios this is fine.
+
+This is not recommended but if you want every single test to run at the same time in evry class then you can create a new file like `TestParallelism.cs` and add the following to change the behaviour.
+
+```C#
+using Xunit;
+
+[assembly: CollectionBehaviour(CollectionBehaviour.CollectionPerAssembly)]
+```
+
+Another setting which may be more useful is disabling tests running in Parallel. If you need to enable this, it could be a sign you are doing something wrong in your tests.
+
+```C#
+using Xunit;
+
+[assembly: CollectionBehaviour(DisableTestParallelization = true)]
+```
+
+We can also change the amount of threads which can run tests.
+
+```C#
+using Xunit;
+
+[assembly: CollectionBehaviour(MaxParallelThreads = 24)]
+```
+
+### Advanced Parameterization
+
+When we wanted to pass multiple data sets into our tests earlier, we used the `[Theory]` attribute then passed in our data through `[InlineData]`. We can also use member parameterization to make this easier if the data sets get too big.
+
+We can either use a static object or a method to pass the data into our tests. We can pick either one but this example shows how to use both.
+
+```C#
+using System.Collections.Generic;
+using Xunit;
+
+public class CalculatorTests
+{
+    private readonly Calculator _calculator = new Calculator();
+
+    // Static property that returns IEnumerable<object[]>
+    public static IEnumerable<object[]> AddTestData =>
+        new List<object[]>
+        {
+            new object[] { 1, 2, 3 },
+            new object[] { -1, -1, -2 },
+            new object[] { 100, 200, 300 }
+        };
+
+    // Static method that returns IEnumerable<object[]>
+    public static IEnumerable<object[]> GetAddTestData()
+    {
+        yield return new object[] { 2, 3, 5 };
+        yield return new object[] { -5, 5, 0 };
+    }
+
+    [Theory]
+    [MemberData(nameof(AddTestData))]  // using property
+    [MemberData(nameof(GetAddTestData))] // using method
+    public void Add_WorksCorrectly(int a, int b, int expected)
+    {
+        var result = _calculator.Add(a, b);
+        Assert.Equal(expected, result);
+    }
+}
+
+```
+
+If the test data gets very large, we can use Class Parameterization.
+
+Lets make our Test Parameterization class.
+
+```C#
+using System.Collections;
+using System.Collections.Generic;
+
+// Must implement IEnumerable<object[]>
+public class MultiplyTestData : IEnumerable<object[]>
+{
+    public IEnumerator<object[]> GetEnumerator()
+    {
+        yield return new object[] { 2, 3, 6 };
+        yield return new object[] { -1, 5, -5 };
+        yield return new object[] { 0, 10, 0 };
+        yield return new object[] { 7, 7, 49 };
+    }
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+}
+```
+
+We can now implement it like this
+
+```C#
+using Xunit;
+
+public class CalculatorTests
+{
+    private readonly Calculator _calculator = new Calculator();
+
+    [Theory]
+    [ClassData(typeof(MultiplyTestData))]
+    public void Multiply_WorksCorrectly(int a, int b, int expected)
+    {
+        var result = _calculator.Multiply(a, b);
+        Assert.Equal(expected, result);
+    }
+}
+```
+
+### Testing DateTime
+
+Unit testing methods that call `DateTime.Now` (or `DateTime.UtcNow`) can be tricky because they introduce non-determinism. Every time you run the test, the current time is different, so your tests become unreliable.
+
+Lets take this example. We cannot test it because two of the conditions will always fail depending what time the tests are run through the day.
+
+```C#
+public class GreetingService
+{
+    public string GetGreeting()
+    {
+        var hour = DateTime.Now.Hour;
+        if (hour < 12) return "Good morning!";
+        if (hour < 18) return "Good afternoon!";
+        return "Good evening!";
+    }
+}
+```
+
+To fix this, lets abstract the DateTime Provider.
+
+```C#
+// Make an interface
+public interface IDateTimeProvider
+{
+    DateTime Now { get; }
+}
+
+// Implement it into an instance
+public class SystemDateTimeProvider : IDateTimeProvider
+{
+    public DateTime Now => DateTime.Now;
+}
+
+// Use this in our service code
+public class GreetingService
+{
+    private readonly IDateTimeProvider _dateTimeProvider;
+
+    public GreetingService(IDateTimeProvider dateTimeProvider)
+    {
+        _dateTimeProvider = dateTimeProvider;
+    }
+
+    public string GetGreeting()
+    {
+        var hour = _dateTimeProvider.Now.Hour;
+        if (hour < 12) return "Good morning!";
+        if (hour < 18) return "Good afternoon!";
+        return "Good evening!";
+    }
+}
+```
+
+We can now write a test and use a `Mock` to generate the hours.
+
+```C#
+using Xunit;
+using NSubstitute;
+
+public class GreetingServiceTests
+{
+    [Theory]
+    [InlineData(9, "Good morning!")]
+    [InlineData(15, "Good afternoon!")]
+    [InlineData(20, "Good evening!")]
+    public void GetGreeting_ReturnsExpectedGreeting(int hour, string expected)
+    {
+        // Arrange: substitute a fake time provider
+        var fakeDateTime = Substitute.For<IDateTimeProvider>();
+        fakeDateTime.Now.Returns(new DateTime(2025, 1, 1, hour, 0, 0));
+
+        var service = new GreetingService(fakeDateTime);
+
+        // Act
+        var result = service.GetGreeting();
+
+        // Assert
+        Assert.Equal(expected, result);
+    }
+}
+```
+
+### Code Coverage
+
+When testing in our IDE we may want to see how much of our code is covered by the tests we have been writing. For JetBrains Rider, this is built in by default. For Visual Studio, this is in the paid version.
+
+If we want, we can also use a third party dependency to generate code coverage reports in case the want to implement checks into our CI/CD pipeline called `coverlet.console`.
+
+First lets begin by installing the package.
+
+```bash
+dotnet tool install -g coverlet.console
+```
+
+We then build the project using `dotnet build` and get the name of the Test .dll that was generated.
+
+We then run coverlet with the path to that dll file.
+
+```bash
+coverlet ./bin/Debug/net9.0/Users.Api.Tests.Unit.dll --target "dotnet" --targetargs "test --no-build"
+```
+
+Now if we have certain parts of code we don't wanrt to include in our code coverage e.g Repositories in unit tests we can add an attribute to our classes.
+
+```C#
+[ExcludeFromCodeCoverage]
+public class UserRepository : IUserRepository
+{
+    //
+}
+```
+
+Putting attributes on all our classes can be tedious. With coverlet, we can add the exclude argument to our command instead adding namespaces we don't want to cover.
+
+```bash
+coverlet ./bin/Debug/net9.0/Users.Api.Tests.Unit.dll --target "dotnet" --targetargs "test --no-build" --exclude "[*]Users.Api.Repositories*"
+```
 
 ## Integration Testing
 
