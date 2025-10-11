@@ -111,6 +111,18 @@
     - [Seeding The Database](#seeding-the-database)
     - [Reverse-engineer from an existing database](#reverse-engineer-from-an-existing-database)
     - [MSSQL Connection String Example](#mssql-connection-string-example)
+    - [Example CRUD using Async Await](#example-crud-using-async-await)
+    - [Logging Queries Sent To The Database](#logging-queries-sent-to-the-database)
+    - [Database Annotations](#database-annotations)
+    - [Fluent API](#fluent-api)
+    - [Relationships](#relationships)
+    - [Value Converters](#value-converters)
+    - [Owned And Complex Types](#owned-and-complex-types)
+    - [Default Values](#default-values)
+    - [Global Query Filters](#global-query-filters)
+    - [Migrations](#migrations)
+    - [Testing Entity Framework](#testing-entity-framework)
+    - [Multi Tenancy](#multi-tenancy)
 - [Sending Emails](#sending-emails) 
     - [Getting Started Example](#getting-started-example)
     - [Setting Up Mailpit](#setting-up-mailpit)
@@ -6382,6 +6394,1361 @@ This is for connecting to a local instance of the database
     "DefaultConnection": "Data Source=WinDev2401Eval\\SQLEXPRESS;Initial Catalog=financial-app;Integrated Security=True;Connect Timeout=30;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False"
 },
 ```
+
+### Example CRUD using Async Await
+
+In the example above, we just used thread blocking calls to retrieve our data. In this example we will use async await to create non-blocking DB access.
+
+```C#
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using AsyncCrudDemo.Data;
+using AsyncCrudDemo.Models;
+
+namespace AsyncCrudDemo.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController(AppDbContext context) : ControllerBase
+{
+    // GET: api/products
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<Product>>> GetProducts()
+    {
+        return await context.Products.AsNoTracking().ToListAsync();
+    }
+
+    // GET: api/products/5
+    [HttpGet("{id}")]
+    public async Task<ActionResult<Product>> GetProduct(int id)
+    {
+        var product = await context.Products.FindAsync(id);
+
+        if (product == null)
+            return NotFound();
+
+        return product;
+    }
+
+    // POST: api/products
+    [HttpPost]
+    public async Task<ActionResult<Product>> CreateProduct(Product product)
+    {
+        context.Products.Add(product);
+        await context.SaveChangesAsync();
+
+        return CreatedAtAction(nameof(GetProduct), new { id = product.Id }, product);
+    }
+
+    // PUT: api/products/5
+    [HttpPut("{id:int}")]
+    public async Task<IActionResult> UpdateProduct(int id, Product updatedProduct)
+    {
+        if (id != updatedProduct.Id)
+            return BadRequest();
+
+        var product = await context.Products.FindAsync(id);
+        if (product == null)
+            return NotFound();
+
+        product.Name = updatedProduct.Name;
+        product.Price = updatedProduct.Price;
+
+        await context.SaveChangesAsync();
+        return NoContent();
+    }
+
+    // DELETE: api/products/5
+    [HttpDelete("{id:int}")]
+    public async Task<IActionResult> DeleteProduct(int id)
+    {
+        var product = await context.Products.FindAsync(id);
+        if (product == null)
+            return NotFound();
+
+        context.Products.Remove(product);
+        await context.SaveChangesAsync();
+        return NoContent();
+    }
+}
+```
+
+### Logging Queries Sent To The Database
+
+If we need to log queries being sent to the database to see if there is anything wrong, we can enable `LogTo()` method in our context. This spits out a lot of extra data but is a quick way of seeing what is happening.
+
+For more production based settings, we would use something like `Serilog` and use a file sink to dump out into. This does not need the `EnableDetailedErrors` or `LogTo` adding to our options and can be set up as normal.
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using AsyncCrudDemo.Models;
+using Microsoft.Extensions.Logging;
+
+namespace AsyncCrudDemo.Data;
+
+public class AppDbContext : DbContext
+{
+    public DbSet<Product> Products => Set<Product>();
+
+    public AppDbContext(DbContextOptions<AppDbContext> options)
+        : base(options)
+    {
+    }
+
+    // Optional constructor for cases where DI isn't used
+    public AppDbContext()
+    {
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        // Only configure if options not already provided by DI (to avoid conflicts)
+        if (!optionsBuilder.IsConfigured)
+        {
+            optionsBuilder.UseSqlite("Data Source=products.db");
+        }
+
+        // Configure EF Core logging
+        optionsBuilder
+            .EnableSensitiveDataLogging() // logs parameter values (useful for debugging; avoid in production)
+            .EnableDetailedErrors()       // provides more detailed EF Core exceptions
+            .LogTo(
+                message => Console.WriteLine($"[EF LOG] {message}"),
+                new[] { DbLoggerCategory.Database.Command.Name },
+                LogLevel.Information)
+            .LogTo(
+                message => Console.WriteLine($"[EF DEBUG] {message}"),
+                new[] { DbLoggerCategory.ChangeTracking.Name },
+                LogLevel.Debug);
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Example: configure a table name and constraints
+        modelBuilder.Entity<Product>(entity =>
+        {
+            entity.ToTable("Products");
+
+            entity.HasKey(e => e.Id);
+
+            entity.Property(e => e.Name)
+                .HasMaxLength(200)
+                .IsRequired();
+
+            entity.Property(e => e.Price)
+                .HasPrecision(10, 2);
+        });
+    }
+}
+```
+
+### Database Annotations
+
+Below is a comprehensive example of an entity class that uses many of the most common EF Core data annotations to demonstrate:
+
+- Primary key & identity
+- Required fields & string length constraints
+- Indexes
+- Relationships (foreign keys)
+- Computed & ignored properties
+- Column mapping and naming
+
+```C#
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
+
+namespace AsyncCrudDemo.Models;
+
+// Example of defining an index using attribute (EF Core 5+)
+[Index(nameof(Email), IsUnique = true)]
+public class Customer
+{
+    // Primary key
+    [Key]
+    [DatabaseGenerated(DatabaseGeneratedOption.Identity)]
+    public int CustomerId { get; set; }
+
+    // Required string with max length
+    [Required]
+    [StringLength(100)]
+    public string FirstName { get; set; } = string.Empty;
+
+    [Required]
+    [StringLength(100)]
+    public string LastName { get; set; } = string.Empty;
+
+    // Unique index (via attribute above) + required + email format hint
+    [Required]
+    [StringLength(255)]
+    [EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    // Custom column name and type
+    [Column("Phone_Number", TypeName = "varchar(20)")]
+    public string? PhoneNumber { get; set; }
+
+    // Date with database default value (set in OnModelCreating or migration)
+    [Required]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    // Decimal with precision and scale
+    [Column(TypeName = "decimal(10,2)")]
+    [Range(0, 1000000)]
+    public decimal AccountBalance { get; set; }
+
+    // Navigation property - one-to-many with Orders
+    public ICollection<Order> Orders { get; set; } = new List<Order>();
+
+    // Computed (not mapped to database)
+    [NotMapped]
+    public string FullName => $"{FirstName} {LastName}";
+}
+
+// Example of a related entity
+public class Order
+{
+    [Key]
+    public int OrderId { get; set; }
+
+    [Required]
+    public DateTime OrderDate { get; set; } = DateTime.UtcNow;
+
+    [Required]
+    [Column(TypeName = "decimal(10,2)")]
+    public decimal TotalAmount { get; set; }
+
+    // Foreign key
+    [ForeignKey(nameof(Customer))]
+    public int CustomerId { get; set; }
+
+    // Navigation property
+    public Customer? Customer { get; set; }
+}
+```
+
+### Fluent API
+
+Using the Fluent API is often preferred in larger projects because it keeps your entities clean (no attributes) and centralizes all mapping logic in `OnModelCreating`.
+
+Lets start with these two models
+
+```C#
+namespace AsyncCrudDemo.Models;
+
+public class Customer
+{
+    public int CustomerId { get; set; }
+    public string FirstName { get; set; } = string.Empty;
+    public string LastName { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string? PhoneNumber { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public decimal AccountBalance { get; set; }
+
+    // Navigation property
+    public ICollection<Order> Orders { get; set; } = new List<Order>();
+
+    // Computed property (not mapped to DB)
+    public string FullName => $"{FirstName} {LastName}";
+}
+
+public class Order
+{
+    public int OrderId { get; set; }
+    public DateTime OrderDate { get; set; } = DateTime.UtcNow;
+    public decimal TotalAmount { get; set; }
+
+    public int CustomerId { get; set; }
+    public Customer? Customer { get; set; }
+}
+```
+
+Now in our Context file, we can use the `OnModelCreating` method to set up our schema definitions
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using AsyncCrudDemo.Models;
+
+namespace AsyncCrudDemo.Data;
+
+public class AppDbContext : DbContext
+{
+    public DbSet<Customer> Customers => Set<Customer>();
+    public DbSet<Order> Orders => Set<Order>();
+
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
+    {
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        if (!optionsBuilder.IsConfigured)
+        {
+            optionsBuilder.UseSqlite("Data Source=customers.db");
+        }
+
+        // Enable useful EF debugging
+        optionsBuilder
+            .EnableSensitiveDataLogging()
+            .EnableDetailedErrors()
+            .LogTo(Console.WriteLine, LogLevel.Information);
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // ============================
+        // Customer Entity Configuration
+        // ============================
+        var customer = modelBuilder.Entity<Customer>();
+
+        customer.ToTable("Customers");
+
+        // Primary key
+        customer.HasKey(c => c.CustomerId);
+
+        // Properties
+        customer.Property(c => c.FirstName)
+            .IsRequired()
+            .HasMaxLength(100);
+
+        customer.Property(c => c.LastName)
+            .IsRequired()
+            .HasMaxLength(100);
+
+        customer.Property(c => c.Email)
+            .IsRequired()
+            .HasMaxLength(255);
+
+        // Index (unique)
+        customer.HasIndex(c => c.Email)
+            .IsUnique();
+
+        customer.Property(c => c.PhoneNumber)
+            .HasColumnName("Phone_Number")
+            .HasColumnType("varchar(20)");
+
+        customer.Property(c => c.CreatedAt)
+            .IsRequired();
+
+        customer.Property(c => c.AccountBalance)
+            .HasPrecision(10, 2)
+            .HasDefaultValue(0m);
+
+        // Ignore computed property
+        customer.Ignore(c => c.FullName);
+
+        // ============================
+        // Order Entity Configuration
+        // ============================
+        var order = modelBuilder.Entity<Order>();
+
+        order.ToTable("Orders");
+
+        order.HasKey(o => o.OrderId);
+
+        order.Property(o => o.OrderDate)
+            .IsRequired();
+
+        order.Property(o => o.TotalAmount)
+            .HasPrecision(10, 2)
+            .IsRequired();
+
+        // Relationships
+        order.HasOne(o => o.Customer)
+            .WithMany(c => c.Orders)
+            .HasForeignKey(o => o.CustomerId)
+            .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+```
+
+Now, as your app grows this is going to get messy very fast. Lets split these out into configuration files instead. These classes need to implement the `IEntityTypeConfiguration<>` interface which wants us to implement a `Configure` method. We then use `ApplyConfiguration` if we want to add each configuration individually or `ApplyConfigurationsFromAssembly` to find all the classes using the interface.
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using AsyncCrudDemo.Models;
+
+namespace AsyncCrudDemo.Data.Configurations;
+
+public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
+{
+    public void Configure(EntityTypeBuilder<Customer> builder)
+    {
+        builder.ToTable("Customers");
+
+        builder.HasKey(c => c.CustomerId);
+
+        builder.Property(c => c.FirstName)
+            .IsRequired()
+            .HasMaxLength(100);
+
+        builder.Property(c => c.LastName)
+            .IsRequired()
+            .HasMaxLength(100);
+
+        builder.Property(c => c.Email)
+            .IsRequired()
+            .HasMaxLength(255);
+
+        builder.HasIndex(c => c.Email)
+            .IsUnique();
+
+        builder.Property(c => c.PhoneNumber)
+            .HasColumnName("Phone_Number")
+            .HasColumnType("varchar(20)");
+
+        builder.Property(c => c.CreatedAt)
+            .IsRequired();
+
+        builder.Property(c => c.AccountBalance)
+            .HasPrecision(10, 2)
+            .HasDefaultValue(0m);
+
+        builder.Ignore(c => c.FullName);
+    }
+}
+
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.ToTable("Orders");
+
+        builder.HasKey(o => o.OrderId);
+
+        builder.Property(o => o.OrderDate)
+            .IsRequired();
+
+        builder.Property(o => o.TotalAmount)
+            .HasPrecision(10, 2)
+            .IsRequired();
+
+        builder.HasOne(o => o.Customer)
+            .WithMany(c => c.Orders)
+            .HasForeignKey(o => o.CustomerId)
+            .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+```
+
+Now we can just change our `OnModelCreating` to this
+
+```C#
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    // Applies all IEntityTypeConfiguration<T> classes automatically
+    modelBuilder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+}
+```
+
+### Relationships
+
+EF Core supports several kinds of relationships between entities:
+
+- One-to-Many
+- One-to-One
+- Many-to-Many
+- Self-referencing
+
+One To Many:
+
+```C#
+// Entities
+public class Customer
+{
+    public int CustomerId { get; set; }
+    public string Name { get; set; } = string.Empty;
+
+    public ICollection<Order> Orders { get; set; } = new List<Order>();
+}
+
+public class Order
+{
+    public int OrderId { get; set; }
+    public DateTime OrderDate { get; set; } = DateTime.UtcNow;
+
+    public int CustomerId { get; set; }
+    public Customer? Customer { get; set; }
+}
+
+// Configurations
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
+{
+    public void Configure(EntityTypeBuilder<Customer> builder)
+    {
+        builder.ToTable("Customers");
+        builder.HasKey(c => c.CustomerId);
+        builder.Property(c => c.Name).IsRequired();
+    }
+}
+
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.ToTable("Orders");
+        builder.HasKey(o => o.OrderId);
+
+        builder.HasOne(o => o.Customer)
+               .WithMany(c => c.Orders)
+               .HasForeignKey(o => o.CustomerId)
+               .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+```
+
+One To One:
+
+```C#
+// Entities
+public class Customer
+{
+    public int CustomerId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public Address? Address { get; set; }
+
+    public ICollection<Order> Orders { get; set; } = new List<Order>();
+}
+
+public class Address
+{
+    public int AddressId { get; set; }
+    public string Street { get; set; } = string.Empty;
+    public string City { get; set; } = string.Empty;
+
+    public int CustomerId { get; set; }
+    public Customer? Customer { get; set; }
+}
+
+// Configuration
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
+{
+    public void Configure(EntityTypeBuilder<Customer> builder)
+    {
+        builder.ToTable("Customers");
+        builder.HasKey(c => c.CustomerId);
+        builder.Property(c => c.Name).IsRequired();
+    }
+}
+
+public class AddressConfiguration : IEntityTypeConfiguration<Address>
+{
+    public void Configure(EntityTypeBuilder<Address> builder)
+    {
+        builder.ToTable("Addresses");
+        builder.HasKey(a => a.AddressId);
+
+        builder.HasOne(a => a.Customer)
+               .WithOne(c => c.Address)
+               .HasForeignKey<Address>(a => a.CustomerId)
+               .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+```
+
+Many-to-Many:
+
+```C#
+// Models
+public class Student
+{
+    public int StudentId { get; set; }
+    public string Name { get; set; } = string.Empty;
+
+    public ICollection<Course> Courses { get; set; } = new List<Course>();
+}
+
+public class Course
+{
+    public int CourseId { get; set; }
+    public string Title { get; set; } = string.Empty;
+
+    public ICollection<Student> Students { get; set; } = new List<Student>();
+}
+
+// Configuration
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class StudentConfiguration : IEntityTypeConfiguration<Student>
+{
+    public void Configure(EntityTypeBuilder<Student> builder)
+    {
+        builder.ToTable("Students");
+        builder.HasKey(s => s.StudentId);
+        builder.Property(s => s.Name).IsRequired();
+
+        builder.HasMany(s => s.Courses)
+               .WithMany(c => c.Students)
+               .UsingEntity<Dictionary<string, object>>(
+                    "StudentCourse",  // Join table name
+                    j => j.HasOne<Course>().WithMany().HasForeignKey("CourseId"),
+                    j => j.HasOne<Student>().WithMany().HasForeignKey("StudentId"),
+                    j =>
+                    {
+                        j.HasKey("StudentId", "CourseId");
+                        j.ToTable("StudentCourses");
+                    });
+    }
+}
+```
+
+Self-referencing:
+
+```C#
+// Models
+public class Employee
+{
+    public int EmployeeId { get; set; }
+    public string Name { get; set; } = string.Empty;
+
+    public int? ManagerId { get; set; }
+    public Employee? Manager { get; set; }
+
+    public ICollection<Employee> DirectReports { get; set; } = new List<Employee>();
+}
+
+// Configuration
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class EmployeeConfiguration : IEntityTypeConfiguration<Employee>
+{
+    public void Configure(EntityTypeBuilder<Employee> builder)
+    {
+        builder.ToTable("Employees");
+        builder.HasKey(e => e.EmployeeId);
+
+        builder.Property(e => e.Name).IsRequired();
+
+        builder.HasOne(e => e.Manager)
+               .WithMany(m => m.DirectReports)
+               .HasForeignKey(e => e.ManagerId)
+               .OnDelete(DeleteBehavior.Restrict);
+    }
+}
+```
+
+By default, Entity Framework Core does not lazy load all relationships and needs to be defined when we call our query. For this we use the `Include` method.
+
+```C#
+var customersWithOrders = await context.Customers
+    .Include(c => c.Orders) // Eagerly load Orders
+    .ToListAsync();
+
+// If we need to include nested relationships, we can also use ThenInclude
+var customersWithOrders = await context.Customers
+    .Include(c => c.Orders)
+    .ThenInclude(o => o.OrderItems)
+    .ThenInclude(i => i.Product);
+```
+
+If we get any errors about `A Possible object cycle was detected`, this is because we have a circular dependency which is fetching back the relationship but inside that is then linking back to our main model and repeating this loop.
+
+To fix this, we can go into our model and apply the `[JsonIgnore]` attribute to the navigation property. We can also use a `DTO` and return the data we actually want.
+
+```C#
+[HttpGet("{id}")]
+public async Task<ActionResult<CustomerDto>> GetCustomer(int id)
+{
+    var customer = await _context.Customers
+        .Include(c => c.Orders)
+        .FirstOrDefaultAsync(c => c.CustomerId == id);
+
+    if (customer == null) return NotFound();
+
+    var dto = new CustomerDto
+    {
+        CustomerId = customer.CustomerId,
+        Name = customer.Name,
+        Orders = customer.Orders
+            .Select(o => new OrderDto
+            {
+                OrderId = o.OrderId,
+                OrderDate = o.OrderDate
+            }).ToList()
+    };
+
+    return dto;
+}
+```
+
+### Value Converters
+
+Value Converters are a very handy feature of Entity Framework Core.
+
+They let you map between a property in your entity and a different representation in the database without changing your model.
+
+For most scenarios we can use the built in Value Converters built into entity framework which can be found here https://learn.microsoft.com/en-us/ef/core/modeling/value-conversions?tabs=data-annotations  
+
+```C#
+builder.Property(movie => movie.ReleaseDate)
+    .HasConversion<string>();
+```
+
+If we want to make our own, we can inherit from `ValueConverter` class like this
+
+```C#
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using System.Security.Cryptography;
+using System.Text;
+
+public class EncryptedStringConverter : ValueConverter<string, string>
+{
+    private static readonly byte[] Key = Encoding.UTF8.GetBytes("1234567890123456");
+    private static readonly byte[] IV = Encoding.UTF8.GetBytes("abcdefghijklmnop");
+
+    public EncryptedStringConverter()
+        : base(
+            v => Encrypt(v),
+            v => Decrypt(v))
+    {
+    }
+
+    private static string Encrypt(string plainText)
+    {
+        if (string.IsNullOrEmpty(plainText)) return plainText;
+
+        using var aes = Aes.Create();
+        aes.Key = Key;
+        aes.IV = IV;
+
+        using var encryptor = aes.CreateEncryptor();
+        var bytes = Encoding.UTF8.GetBytes(plainText);
+        var cipher = encryptor.TransformFinalBlock(bytes, 0, bytes.Length);
+
+        return Convert.ToBase64String(cipher);
+    }
+
+    private static string Decrypt(string cipherText)
+    {
+        if (string.IsNullOrEmpty(cipherText)) return cipherText;
+
+        using var aes = Aes.Create();
+        aes.Key = Key;
+        aes.IV = IV;
+
+        using var decryptor = aes.CreateDecryptor();
+        var bytes = Convert.FromBase64String(cipherText);
+        var plain = decryptor.TransformFinalBlock(bytes, 0, bytes.Length);
+
+        return Encoding.UTF8.GetString(plain);
+    }
+}
+```
+
+We can then use it like so
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
+{
+    public void Configure(EntityTypeBuilder<Customer> builder)
+    {
+        builder.ToTable("Customers");
+
+        builder.Property(c => c.SensitiveData)
+               .HasConversion(new EncryptedStringConverter())
+               .HasMaxLength(512);
+    }
+}
+```
+
+### Owned And Complex Types
+
+Owned and complex types in Entity Framework Core are powerful patterns for value objects and aggregates. They allow you to group related properties into components inside an entity without creating separate tables (unless you want to).
+
+An owned type is a class that:
+
+- Has no identity of its own (no primary key).
+- Is always owned by another entity.
+- Gets stored in the same table by default as the owner.
+- Can also be mapped to a separate table if needed.
+
+This is ideal for Value Objects.
+
+```C#
+// Value Object
+public class Address
+{
+    public string Street { get; set; } = string.Empty;
+    public string City { get; set; } = string.Empty;
+    public string Country { get; set; } = string.Empty;
+}
+
+// Entity
+public class Customer
+{
+    public int CustomerId { get; set; }
+    public string Name { get; set; } = string.Empty;
+
+    public Address Address { get; set; } = new Address();
+}
+
+// Configuration
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
+{
+    public void Configure(EntityTypeBuilder<Customer> builder)
+    {
+        builder.ToTable("Customers");
+        builder.HasKey(c => c.CustomerId);
+
+        // If we want the address in the customers table
+        builder.OwnsOne(c => c.Address, address =>
+        {
+            address.Property(a => a.Street).HasColumnName("Street");
+            address.Property(a => a.City).HasColumnName("City");
+            address.Property(a => a.Country).HasColumnName("Country");
+        });
+
+        // If we want to split out the address into it's own table
+        builder.OwnsOne(c => c.Address, address =>
+        {
+            address.ToTable("CustomerAddresses");
+            address.WithOwner().HasForeignKey("CustomerId");
+            address.Property(a => a.Street);
+            address.Property(a => a.City);
+            address.Property(a => a.Country);
+        });
+    }
+}
+
+// Querying the data
+var customer = await context.Customers
+    .Where(c => c.Address.City == "London")
+    .FirstOrDefaultAsync();
+
+```
+
+Starting with EF Core 7, `complex types` are basically a more modern, cleaner way to define what used to be "owned entity types" but with:
+
+- Simpler configuration (no OwnsOne required).
+- More natural value object semantics.
+- Reusable type definitions across multiple entities.
+
+A complex type is similar to an owned type, but:
+
+- It doesn't need explicit .OwnsOne configuration (you register the complex type once).
+- It can be reused by multiple owners easily.
+- It does not support separate-table mapping (always inline).
+
+```C#
+// Address class complex type
+[ComplexType]
+public class Address
+{
+    public string Street { get; set; } = string.Empty;
+    public string City { get; set; } = string.Empty;
+    public string Country { get; set; } = string.Empty;
+}
+
+// or register with fluent api
+modelBuilder.ComplexType<Address>();
+
+// Entity
+public class Customer
+{
+    public int CustomerId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public Address Address { get; set; } = new Address();
+}
+```
+
+### Default Values
+
+If we want to do something like set a default value for a createdDate field, we can use the `HasDefaultValueSql` method. If we want a static string or int, we can use `HasDefaultSql`.
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.ToTable("Orders");
+        builder.HasKey(o => o.OrderId);
+
+        builder.Property(o => o.CreatedAt)
+               .HasDefaultValueSql("GETUTCDATE()"); // SQL Server
+               
+        builder.Property(o => o.Status)
+               .HasDefaultValue("Pending");
+    }
+}
+```
+
+Sometimes, we may want to generate a value in the code and we can use Value Generators for this.
+
+```C#
+// Create our value generator
+using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.ValueGeneration;
+
+public class CustomerIdValueGenerator : ValueGenerator<string>
+{
+    public override bool GeneratesTemporaryValues => false;
+
+    public override string Next(EntityEntry entry)
+    {
+        // Example: simple timestamp + random number
+        return $"CUST-{DateTime.UtcNow:yyyyMMddHHmmss}-{Random.Shared.Next(1000, 9999)}";
+    }
+}
+
+// Apply this in Fluent API
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+public class Customer
+{
+    public string CustomerId { get; set; } = string.Empty; // key
+    public string Name { get; set; } = string.Empty;
+}
+
+public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
+{
+    public void Configure(EntityTypeBuilder<Customer> builder)
+    {
+        builder.HasKey(c => c.CustomerId);
+
+        builder.Property(c => c.CustomerId)
+               .HasValueGenerator<CustomerIdValueGenerator>();
+    }
+}
+```
+
+### Global Query Filters
+
+Global query filters in EF Core let you define a filter that automatically applies to all queries for a given entity type. This is super useful for things like:
+
+- Soft deletes (IsDeleted = true)
+- Multi-tenancy (TenantId = currentTenantId)
+- Filtering active users (IsActive = true)
+
+```C#
+using Microsoft.EntityFrameworkCore;
+
+public class AppDbContext : DbContext
+{
+    public DbSet<Customer> Customers => Set<Customer>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        // Global filter: only include non-deleted customers
+        modelBuilder.Entity<Customer>().HasQueryFilter(c => !c.IsDeleted);
+    }
+}
+
+// If we need to override this filter in our query
+var allCustomers = await context.Customers
+    .IgnoreQueryFilters() // bypass the global filter
+    .ToListAsync();
+```
+
+### Migrations
+
+This part is a more in depth guide to migrations than the other migrations section.
+
+In Entity Framework Core (EF Core), migrations are a way to incrementally evolve your database schema as your application's data model changes over time.
+
+They allow you to keep your code (model classes) and your database schema in sync and they can even generate SQL scripts to apply those schema changes automatically.
+
+To get started, we will need to install a nuget package
+
+```bash
+dotnet add package Microsoft.EntityFrameworkCore.Tools
+```
+
+We will also need to install the Entity Framework Core Tools globally on our machine.
+
+```bash
+dotnet tool install -g dotnet-ef
+
+# confirm it installed
+dotnet-ef
+```
+
+To add a migration, we can run the following. The final argument is the name of the migration. Each time we update the models, we can run the add migrations command again to create a new migration file.  
+
+```bash
+dotnet-ef migrations add AddProductsTable
+
+# If you make a mistake, you can roll it back
+dotnet-ef migrations remove
+```
+
+This should now create a migrations folder with the database changes. It generates a set of files like this:  
+
+```bash
+Migrations/
+    20251011123045_AddProductsTable.cs
+    20251011123045_AddProductsTable.Designer.cs
+    MyDbContextModelSnapshot.cs
+```
+
+- `20251011123045_AddProductsTable.cs` - Contains a `Up` and `Down` method which apply the changes or reverts back depending on which command is run.
+- `20251011123045_AddProductsTable.Designer.cs` - This file is auto-generated and usually not edited by hand. It contains a snapshot of the model at the time of the migration, some EF Core metadata & used internally to know what changed between migrations.
+- `MyDbContextModelSnapshot.cs` - This file is crucial. It represents the latest state of your model. It is updated every time you add a migration. EF Core uses it to compare your current model with the last migration and determine what changed. If you delete this file, EF Core will lose its reference point (you can regenerate it, but it's best to keep it intact).
+
+
+When renaming fields or types, be careful with what the migration generates. It may drop a column and recreate it which can cause data loss in production. If you need to modify a column, you may need to modify the migration to use the `AlterColumn<>` & `RenameColumn`.  
+
+```C#
+// In the Up() method
+
+// Change the type
+migrationBuilder.AlterColumn<int>(
+    name: "OldColumnName",
+    table: "TestTable",
+    type: "decimal(18,2)" // The type we want to change it to
+    nullable: false,
+    defaultValue: 0m
+);
+
+// Change the name
+migrationBuilder.RenameColumn(
+    name: "OldColumnName",
+    table: "TestTable",
+    newName: "NewColumnName"
+);
+
+// Don't forget to the the opposite in the down() method
+```
+
+If we want to make sure our application is always running the latest migrations, we can add a check into our `Program.cs` file to see if any migrations are pending.
+
+```C#
+// We don't want the context to stay running once we have finished this check
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var pendingMigrations = await context.Database.GetPendingMigrationsAsync();
+
+    if (pendingMigrations.Count() > 0) {
+        throw new Exception("There are pending migrations to the database.");
+    }
+}
+```
+
+To run the migrations we can use the following command
+
+```bash
+# Use the default database connection string
+dotnet-ef database update
+
+# If we want to target a database (e.g. CI/CD pipeline)
+dotnet-ef database update --connection "SOME_CONNECTION_STRING_HERE"
+
+# If we want to dump out a script to run manually or check changes
+dotnet-ef migrations script > script.sql
+
+# If we want to generate an executable to run all our migrations
+dotnet-ef migrations bundle
+```
+
+### Testing Entity Framework
+
+There are several ways of testing Entity Frameworks and how our application is working with our database.
+
+To begin, we could use a `test database`. This is normally a replication of a production database with a limited data set. We then set a connection string to point at our context and run tests as normal. This works great because we are using the same tech stack, doesn't require mocking in our tests and testing a lot. The downsides include that we could be testing too much, handling our setup and teardown to make sure we are not leaving around a lot of data slowing down testing over time and possible table locks and concurrency if multiple users are running tests at the same time.
+
+Another way we can run our tests is with using an `In Memory Database` instead. Two ways we can implement this is using Microsofts `In Memory DB` and `SQLite` (SQLite is the recommended version). This is useful as our tests can run a lot faster than using a test database. Usually, because we switch our database for a different engine such as SQLite, this can run into issues like missing features (like stored procedures and functions from MS-SQL), incompatible data types and any raw sql statements if they are being used as the syntax likely won't match.
+
+An example of using an In Memory Database in a test:
+
+We will need to add a package to our Test Project
+
+```C#
+dotnet add package Microsoft.EntityFrameworkCore.Sqlite
+```
+
+```C#
+public class SqlLiteTest : IDisposible
+{
+    private readonly SqliteConnection _connection;
+
+    public SqlLiteTest()
+    {
+        _connection = new SqliteConnection("Filename=:memory:");
+        _connection.Open();
+
+        var context = CreateInMomoryContext();
+
+        context.Database.EnsureCreated();
+
+        context.Genres.AddRange(
+            new Genre { name = "Drama" },
+            new Genre { name = "Action" },
+            new Genre { name = "Comedy" },
+        );
+
+        context.SaveChanges();
+    }
+
+    public void Dispose()
+    {
+        _connection.Dispose();
+    }
+
+    [Fact]
+    public async Task IfGenreExists_ReturnsGenre()
+    {
+        var context = CreateInMemoryContext();
+        var controller = new GenresController(context);
+
+        var response = await controller.Get(2);
+        var okResult = response as OkObjectResult;
+
+        Assert.NotNull(okResult);
+        Assert.Equal(200, okResult.StatusCode);
+        Assert.Equal("Action", (okResult.Value as Genre)?.Name);
+    }
+
+    private MoviesContext CreateInMemoryContext()
+    {
+        var contextOptions = new DbContextOptionsBuilder<MoviesContext>()
+            .UseSqlite(_connection)
+            .Options;
+
+        var context = new MoviesContext(contextOptions);
+
+        return context;
+    }
+}
+```
+
+Another way we can test is using `Fake Db Sets`. This is good for keeping logic in isolation and very fast. The downsides include a lot of mocking our DbContext, Db Sets etc. We may also be using Linq which will make the mocking even more difficult. It will also be problematic if we start using async also.
+
+Example of using a Fake Db Set  
+
+```C#
+using Microsoft.EntityFrameworkCore;
+using System.Collections;
+using System.Linq.Expressions;
+
+public class FakeDbSet<T> : DbSet<T>, IQueryable<T>, IAsyncEnumerable<T> where T : class
+{
+    private readonly List<T> _data;
+    private readonly IQueryable<T> _query;
+
+    public FakeDbSet()
+    {
+        _data = new List<T>();
+        _query = _data.AsQueryable();
+    }
+
+    public override EntityEntry<T> Add(T entity)
+    {
+        _data.Add(entity);
+        return null; // Not tracking entities here, just faking
+    }
+
+    public override EntityEntry<T> Remove(T entity)
+    {
+        _data.Remove(entity);
+        return null;
+    }
+
+    public override EntityEntry<T> Update(T entity)
+    {
+        return null; // no-op for fake
+    }
+
+    public override IEnumerator<T> GetEnumerator() => _data.GetEnumerator();
+
+    Type IQueryable.ElementType => _query.ElementType;
+    Expression IQueryable.Expression => _query.Expression;
+    IQueryProvider IQueryable.Provider => _query.Provider;
+
+    public IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        => new AsyncEnumeratorWrapper<T>(_data.GetEnumerator());
+
+    private class AsyncEnumeratorWrapper<TItem> : IAsyncEnumerator<TItem>
+    {
+        private readonly IEnumerator<TItem> _inner;
+        public AsyncEnumeratorWrapper(IEnumerator<TItem> inner) => _inner = inner;
+        public TItem Current => _inner.Current;
+        public ValueTask DisposeAsync() { _inner.Dispose(); return ValueTask.CompletedTask; }
+        public ValueTask<bool> MoveNextAsync() => new ValueTask<bool>(_inner.MoveNext());
+    }
+}
+```
+
+Then we can use it like this:
+
+```C#
+using Xunit;
+
+public class ProductServiceTests
+{
+    [Fact]
+    public void GetAll_ReturnsAllProducts()
+    {
+        // Arrange
+        var fakeDbSet = new FakeDbSet<Product>();
+        fakeDbSet.Add(new Product { Id = 1, Name = "Keyboard" });
+        fakeDbSet.Add(new Product { Id = 2, Name = "Mouse" });
+
+        var mockContext = new Mock<AppDbContext>(new DbContextOptions<AppDbContext>());
+        mockContext.Setup(c => c.Products).Returns(fakeDbSet);
+
+        var service = new ProductService(mockContext.Object);
+
+        // Act
+        var result = service.GetAll().ToList();
+
+        // Assert
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, p => p.Name == "Keyboard");
+    }
+
+    [Fact]
+    public void Add_AddsProductToDbSet()
+    {
+        // Arrange
+        var fakeDbSet = new FakeDbSet<Product>();
+        var mockContext = new Mock<AppDbContext>(new DbContextOptions<AppDbContext>());
+        mockContext.Setup(c => c.Products).Returns(fakeDbSet);
+
+        var service = new ProductService(mockContext.Object);
+        var product = new Product { Id = 3, Name = "Monitor" };
+
+        // Act
+        service.Add(product);
+
+        // Assert
+        Assert.Single(fakeDbSet);
+        Assert.Equal("Monitor", fakeDbSet.First().Name);
+    }
+}
+```
+
+The last method to run tests for our database dependent logic is the `Repositories`. These classes make it easy to mock, run fast and shields Entity Framework from the logic. There is an in detail example of using this in the Clewan Architecture & DDD section.
+
+With the database, we are likely going to be testing it more with integration tests.
+
+If we need to connect to a test database for this, we can do something like this:
+
+```C#
+var options = new DbContextOptionsBuilder<DbContext>()
+    .UseSqlServer("Data Source=localhost;Initial Catalog=TestDatabase;User Id=sa;Password=SomeStrongPassword123!;TrustServerCertificate=True;").Options;
+
+_testContext = new DbContext(options);
+```  
+
+### Multi Tenancy
+
+Multi-tenancy with Entity Framework Core (EF Core) typically means running one application for multiple customers ('tenants'), while ensuring their data stays isolated. There are a few architectural strategies to achieve this, and EF Core supports them all in different ways.
+
+There are multiple approaches to multi-tenancy in EF Core:
+
+- Single Database & Desciminator: 
+    - Description: All tenants share the same DB, rows have a TenantId column.
+    - Pros: Simple to manage. One schema.
+    - Cons: Security depends on filters. DB can get large.
+- Single Database, Separate Schemas: 
+    - Description: One DB, but each tenant has its own schema.
+    - Pros: Better isolation.
+    - Cons: More complex migrations and management.
+- Separate Databases Per Tenant: 
+    - Description: Each tenant gets its own connection string/database.
+    - Pros: Strong isolation. Easy to scale out.
+    - Cons: Harder to manage migrations and connections.  
+
+Example of the descriminator:
+
+```C#
+// Entity Example
+public class TenantEntity
+{
+    public Guid Id { get; set; }
+    public Guid TenantId { get; set; } 
+    public string Name { get; set; }
+}
+
+// Applying a Global Query Filter
+public class AppDbContext : DbContext
+{
+    private readonly Guid _tenantId;
+
+    public AppDbContext(DbContextOptions<AppDbContext> options, ITenantProvider tenantProvider)
+        : base(options)
+    {
+        _tenantId = tenantProvider.GetTenantId();
+    }
+
+    public DbSet<TenantEntity> TenantEntities { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<TenantEntity>()
+            .HasQueryFilter(e => e.TenantId == _tenantId); 
+    }
+}
+
+// Inserting Tenant Data Automatically
+public override int SaveChanges()
+{
+    foreach (var entry in ChangeTracker.Entries<TenantEntity>())
+    {
+        if (entry.State == EntityState.Added)
+        {
+            entry.Entity.TenantId = _tenantId;
+        }
+    }
+    return base.SaveChanges();
+}
+```
+
+Separate Schemas Per Tenant:
+
+```C#
+// EF Core allows schema mapping dynamically
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    var schema = _tenantProvider.GetSchema(); // e.g. "tenant1"
+    modelBuilder.Entity<Product>().ToTable("Products", schema);
+}
+```
+
+Separate Database Per Tenant:
+
+```C#
+// Dynamic connection string per tenant
+public class TenantDbContextFactory
+{
+    private readonly ITenantProvider _tenantProvider;
+
+    public TenantDbContextFactory(ITenantProvider tenantProvider)
+    {
+        _tenantProvider = tenantProvider;
+    }
+
+    public AppDbContext CreateDbContext()
+    {
+        var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
+        optionsBuilder.UseSqlServer(_tenantProvider.GetConnectionString());
+        return new AppDbContext(optionsBuilder.Options, _tenantProvider);
+    }
+}
+```
+
 
 ## Sending Emails
 
