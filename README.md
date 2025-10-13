@@ -123,6 +123,12 @@
     - [Migrations](#migrations)
     - [Testing Entity Framework](#testing-entity-framework)
     - [Multi Tenancy](#multi-tenancy)
+    - [Inheritence In Models](#inheritence-in-models)
+    - [Compound Keys](#compound-keys)
+    - [Using Raw Queries](#using-raw-queries)
+    - [Keyless Entities](#keyless-entities)
+    - [Interceptors](#interceptors)
+    - [Types Of Performance Issues](#types-of-performance-issues)
 - [Sending Emails](#sending-emails) 
     - [Getting Started Example](#getting-started-example)
     - [Setting Up Mailpit](#setting-up-mailpit)
@@ -1650,7 +1656,7 @@ Make sure to unsubscribe from event handlers as keeping them attached can cause 
 
 A thread is a separate path of execution inside a process. Your program's main method runs on one thread by default. You can create additional threads to run tasks in parallel, allowing your application to stay responsive or perform work concurrently (e.g., processing data while handling user input).
 
-Each thread has its own call stack but shares the process’s memory space with other threads.
+Each thread has its own call stack but shares the process's memory space with other threads.
 
 ```C#
 using System;
@@ -4637,7 +4643,7 @@ dotnet add src/CleanArchitecture.Domain package MediatR
 // First lets make an interface in a Common directory in the Domain layer
 public interface IDomainEvent : INotification;
 
-// We’ll make a simple event that fires when a Record is created. We place these in the domain layer within an events folder.
+// We'll make a simple event that fires when a Record is created. We place these in the domain layer within an events folder.
 public class RecordCreatedEvent : IDomainEvent
 {
     public Guid RecordId { get; }
@@ -4727,7 +4733,7 @@ public class CreateRecordCommandHandler : IRequestHandler<CreateRecordCommand, G
     }
 }
 
-// Handlers live in the Application Layer (or Infrastructure if they’re purely technical).
+// Handlers live in the Application Layer (or Infrastructure if they're purely technical).
 public class RecordCreatedEventHandler : INotificationHandler<RecordCreatedEvent>
 {
     public async Task Handle(RecordCreatedEvent notification, CancellationToken cancellationToken)
@@ -6385,6 +6391,8 @@ The preceding command:
 
 Since SQLite has a limited set of types compared to C#, the scaffolding tool made inferences as to what C# types to use. For example, the Expiration database column was defined as a string because SQLite doesn't have a date data type. The scaffolding tool inferred that the C# type should be DateOnly? based on the data in the database.
 
+If you are using JetBrains Rider, you can install a plugin called `Entity Framework Core UI` which gives you this functionality through a nice UI.
+
 ### MSSQL Connection String Example
 
 This is for connecting to a local instance of the database
@@ -6988,14 +6996,15 @@ public class StudentConfiguration : IEntityTypeConfiguration<Student>
 
         builder.HasMany(s => s.Courses)
                .WithMany(c => c.Students)
+               // This part is optional if you want more control
                .UsingEntity<Dictionary<string, object>>(
                     "StudentCourse",  // Join table name
-                    j => j.HasOne<Course>().WithMany().HasForeignKey("CourseId"),
-                    j => j.HasOne<Student>().WithMany().HasForeignKey("StudentId"),
-                    j =>
+                    left => left.HasOne<Course>().WithMany().HasForeignKey("CourseId"),
+                    right => right.HasOne<Student>().WithMany().HasForeignKey("StudentId"),
+                    linkBuilder =>
                     {
-                        j.HasKey("StudentId", "CourseId");
-                        j.ToTable("StudentCourses");
+                        linkBuilder.HasKey("StudentId", "CourseId");
+                        linkBuilder.ToTable("StudentCourses");
                     });
     }
 }
@@ -7749,6 +7758,490 @@ public class TenantDbContextFactory
 }
 ```
 
+### Inheritence In Models
+
+Entity Framework Core (EF Core) has built-in support for inheritance mapping, which lets you model an object-oriented class hierarchy and map it to one or more database tables.
+
+This is super useful in scenarios like:
+
+- Common base class with shared properties (e.g. Id, CreatedAt)
+- Different derived classes representing specialized entities (e.g. Employee vs Manager)
+- Polymorphic queries (context.People.ToList() returns all subclasses)
+
+There are three primary inheritance strategies in EF Core:
+
+- Table-per-Hierarchy (TPH) - single table, discriminator column (default in EF Core)
+- Table-per-Type (TPT) - separate table per class
+- Table-per-Concrete-Type (TPC) - separate table per class, no base table
+
+Class Hierarchy Example:
+
+```C#
+public abstract class Person
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+}
+
+public class Student : Person
+{
+    public string Grade { get; set; }
+}
+
+public class Teacher : Person
+{
+    public string Subject { get; set; }
+}
+```
+
+Table-per-Hierarchy (TPH) Example:
+
+```C#
+public class SchoolContext : DbContext
+{
+    public DbSet<Person> People { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<Person>()
+            .HasDiscriminator<string>("PersonType")
+            .HasValue<Student>("Student")
+            .HasValue<Teacher>("Teacher");
+    }
+}
+```
+
+Table-per-Type (TPT) - One table per class example:
+
+```C#
+public class SchoolContext : DbContext
+{
+    public DbSet<Person> People { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<Person>().ToTable("People");
+        modelBuilder.Entity<Student>().ToTable("Students");
+        modelBuilder.Entity<Teacher>().ToTable("Teachers");
+    }
+}
+```
+
+Table-per-Concrete-Type (TPC) Example:
+
+```C#
+public class SchoolContext : DbContext
+{
+    public DbSet<Person> People { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<Student>().ToTable("Students");
+        modelBuilder.Entity<Teacher>().ToTable("Teachers");
+
+        modelBuilder.Entity<Person>().UseTpcMappingStrategy(); // 👈 key line
+    }
+}
+```
+
+All strategies let you query the base class and get derived objects automatically:
+
+```C#
+// returns Student and Teacher instances in one list
+var allPeople = context.People.ToList();
+
+// Query by derived type
+var students = context.Set<Student>().ToList();
+
+// Using LINQ filters
+var onlyTeachers = context.People.OfType<Teacher>().ToList();
+```  
+
+### Compound Keys
+
+Compound keys (also called composite primary keys) are when you use more than one property together as the primary key for an entity. This is common in scenarios like join tables in many-to-many relationships, lookup tables with natural keys and domain models where a single property isn't unique.
+
+Example:
+
+```C#
+// Models
+public class Order
+{
+    public int OrderId { get; set; }
+    public DateTime CreatedAt { get; set; }
+
+    public ICollection<OrderItem> Items { get; set; }
+}
+
+public class OrderItem
+{
+    public int OrderId { get; set; }       // Part of composite key
+    public int ProductId { get; set; }     // Part of composite key
+
+    public int Quantity { get; set; }
+
+    public Order Order { get; set; }
+}
+
+// Configuring Composite Keys with Fluent API (required way)
+public class AppDbContext : DbContext
+{
+    public DbSet<Order> Orders { get; set; }
+    public DbSet<OrderItem> OrderItems { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<OrderItem>()
+            .HasKey(oi => new { oi.OrderId, oi.ProductId }); // Composite Key
+
+        modelBuilder.Entity<OrderItem>()
+            .HasOne(oi => oi.Order)
+            .WithMany(o => o.Items)
+            .HasForeignKey(oi => oi.OrderId);
+    }
+}
+```
+
+### Using Raw Queries
+
+Entity Framework Core (EF Core) lets you run raw SQL queries when LINQ isn't flexible enough or you need specific database features.
+
+```C#
+// hard coded parameters example with sql injection protection
+var products = await context.Products
+    .FromSql("SELECT * FROM Products WHERE Price > 50")
+    .ToListAsync();
+
+// With parameters on a raw query
+decimal minPrice = 50;
+var products = await context.Products
+    .FromSqlRaw("SELECT * FROM Products WHERE Price > {0}", minPrice)
+    .ToListAsync();
+
+// Using string interpolation
+var products = await context.Products
+    .FromSqlInterpolated($"SELECT * FROM Products WHERE Price > {minPrice}")
+    .ToListAsync();
+
+// For Non-Query Commands
+int affected = await context.Database.ExecuteSqlRawAsync(
+    "UPDATE Products SET Price = Price * 0.9 WHERE Category = {0}", "Electronics"
+);
+
+Console.WriteLine($"{affected} rows updated.");
+
+```
+
+
+### Keyless Entities
+
+Keyless entities (previously called query types) are used when there's no primary key on the data source (e.g., a view, raw SQL, or denormalized table), you want to map results from a raw SQL query to a .NET class that isn't tracked like a normal entity or you want read-only data (no inserts/updates/deletes).
+
+Say your database has a view or query like:
+
+```sql
+SELECT Category, COUNT(*) AS ProductCount
+FROM Products
+GROUP BY Category
+```
+
+You can map this to a class:
+
+```C#
+public class ProductCategorySummary
+{
+    public string Category { get; set; }
+    public int ProductCount { get; set; }
+}
+```
+
+Configure It in `OnModelCreating`
+
+```C#
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<ProductCategorySummary>()
+        .HasNoKey();
+}
+```
+
+Once configured, you can query it like a DbSet:
+
+```C#
+var summaries = await context.Set<ProductCategorySummary>()
+    .FromSqlRaw("SELECT Category, COUNT(*) AS ProductCount FROM Products GROUP BY Category")
+    .ToListAsync();
+
+foreach (var s in summaries)
+{
+    Console.WriteLine($"{s.Category}: {s.ProductCount}");
+}
+```
+
+You can map a keyless entity directly to a view:
+
+```C#
+modelBuilder.Entity<ProductCategorySummary>()
+    .HasNoKey()
+    .ToView("ProductCategorySummaryView");
+```
+
+An easier way of doing this also is using `context.Database.SqlQuery` and mapping the results to a model class. This is also useful if we are executing `Stored Procedures` sometimes seen in some businesses who handle all their queries using this method. 
+
+```C#
+public class SalesSummary
+{
+    public string Category { get; set; }
+    public decimal TotalSales { get; set; }
+}
+
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+}
+
+// Usage
+var results = await context.Database
+    .SqlQuery<SalesSummary>(
+        "SELECT Category, SUM(Price) AS TotalSales FROM Products GROUP BY Category"
+    )
+    .ToListAsync();
+
+foreach (var item in results)
+{
+    Console.WriteLine($"{item.Category}: {item.TotalSales}");
+}
+```
+
+### Interceptors
+
+Interceptors in Entity Framework Core (EF Core) are a powerful feature that let you hook into EF's execution pipeline and modify or observe behavior globally.
+
+They're great for things like:
+
+- Logging or auditing queries
+- Adding multi-tenancy filters
+- Automatically setting timestamps or user info
+- Blocking or modifying SQL commands before they hit the DB
+- Tracing performance of queries
+
+```C#
+// Creating the interceptor
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
+
+public class SqlLoggingInterceptor : DbCommandInterceptor
+{
+    public override InterceptionResult<DbDataReader> ReaderExecuting(
+        DbCommand command,
+        CommandEventData eventData,
+        InterceptionResult<DbDataReader> result)
+    {
+        Console.WriteLine($"SQL: {command.CommandText}");
+        return base.ReaderExecuting(command, eventData, result);
+    }
+
+    public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+        DbCommand command,
+        CommandEventData eventData,
+        InterceptionResult<DbDataReader> result,
+        CancellationToken cancellationToken = default)
+    {
+        Console.WriteLine($"SQL (async): {command.CommandText}");
+        return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+    }
+}
+
+// Registering the interceptor
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) {}
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        optionsBuilder
+            .AddInterceptors(new SqlLoggingInterceptor()); 
+    }
+
+    public DbSet<Product> Products { get; set; }
+}
+
+// Or
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+{
+    options.UseSqlServer(connectionString);
+    options.AddInterceptors(new SqlLoggingInterceptor());
+});
+```
+
+The different interceptors include:
+
+- `IDbCommandInterceptor` - Intercepts low-level ADO.NET commands (e.g., SELECT, INSERT, etc.). Useful for logging SQL, modifying commands, multi-tenancy filters, performance tracing.
+- `IDbConnectionInterceptor` - Intercepts when EF opens and closes database connections. Useful for connection pooling diagnostics, monitoring, or enforcing policies.
+- `IDbTransactionInterceptor` - Intercepts transaction lifecycle events like BEGIN, COMMIT, ROLLBACK. Useful for logging or enforcing transaction behavior.
+- `ISaveChangesInterceptor` - Intercepts the SaveChanges / SaveChangesAsync process. Great for auditing, timestamps, validation, soft deletes, etc.
+- `IMaterializationInterceptor` - Intercepts when EF constructs entities from database rows. Useful for post-processing objects, injecting dependencies, or caching.
+- `IQueryExpressionInterceptor` - Intercepts EF LINQ query expressions before they're translated to SQL. Useful for query rewriting or injecting global filters. (advanced scenario)
+
+
+### Types Of Performance Issues
+
+Entity Framework Core (EF Core) is powerful and developer-friendly, but if used incorrectly it can easily become a performance bottleneck in real-world apps.
+
+--- 
+N+1 Query Problem:
+
+When loading related entities, EF may issue 1 query for the parent and N separate queries for each related record, instead of one optimized join.
+
+```C#
+// Problem 
+var blogs = await context.Blogs.ToListAsync(); 
+foreach (var blog in blogs)
+{
+    var posts = blog.Posts; // triggers a query per blog!
+}
+
+// Fix
+// Use Include and ThenInclude to eager load related data in one query
+var blogs = await context.Blogs
+    .Include(b => b.Posts)
+    .ToListAsync();
+
+// Or use projection to avoid loading unneeded entities:
+var blogDtos = await context.Blogs
+    .Select(b => new { b.Name, PostCount = b.Posts.Count })
+    .ToListAsync();
+
+```
+--- 
+Loading Too Much Data (Unfiltered Queries):
+
+Loading entire tables or wide objects unnecessarily.
+
+```C#
+// Problem
+var users = await context.Users.ToListAsync(); // thousands of rows
+
+// Fix:
+// Always filter and page:
+var users = await context.Users
+    .Where(u => u.IsActive)
+    .Take(50)
+    .ToListAsync();
+
+// Or project to a DTO:
+var userDtos = await context.Users
+    .Select(u => new UserDto { u.Id, u.Name })
+    .ToListAsync();
+```
+--- 
+Inefficient Change Tracking:
+
+EF tracks all entities by default, which adds overhead if you don't need to modify them.
+
+```C#
+// Problem
+var products = await context.Products.ToListAsync(); 
+
+// Fix
+// Use No Tracking for read-only scenarios:
+var products = await context.Products
+    .AsNoTracking()
+    .ToListAsync();
+```
+--- 
+Inefficient Compiled Queries:
+
+EF Core compiles your LINQ to SQL each time it's run (costly), especially in high-throughput systems.
+
+```C#
+// Problem
+var orders = await context.Orders
+    .Where(o => o.Status == status)
+    .ToListAsync(); // repeated many times
+
+// Fix
+// Use compiled queries
+private static readonly Func<AppDbContext, string, Task<List<Order>>> _ordersQuery =
+    EF.CompileAsyncQuery((AppDbContext ctx, string s) =>
+        ctx.Orders.Where(o => o.Status == s));
+
+var orders = await _ordersQuery(context, "Shipped");
+```
+--- 
+Inefficient LINQ Queries / Client Evaluation:
+
+Some LINQ expressions can't be translated to SQL and are evaluated in memory, leading to:
+
+- Pulling the entire table into memory
+- Slow performance
+- High memory usage
+
+```C#
+// Problem
+var users = await context.Users
+    .Where(u => MyCustomFunc(u.Name)) // can't translate
+    .ToListAsync(); // client evaluation!
+
+// Fixes:
+// Keep queries translatable to SQL:
+// Move non-translatable logic after fetching a minimal set of data.
+// Use EF-supported functions (EF.Functions.Like, etc.).
+```
+--- 
+Missing Indexes / Poor Database Schema:
+
+EF Core generates queries, but performance depends on DB design:
+
+- No indexes on foreign keys or search columns
+- Poor normalization
+- Large tables with no partitioning
+
+```C#
+// Fix
+modelBuilder.Entity<User>()
+    .HasIndex(u => u.Email);
+```
+--- 
+Repeated Context Instantiation or Mismanagement:
+
+- Creating and disposing DbContext too often
+- Or keeping one context alive too long leading to bloated change tracker
+
+Fixes:
+
+- Use short-lived contexts per unit of work
+- In web apps, typically one per request.
+- Avoid keeping the same context for background loops or caching.
+--- 
+Inefficient SaveChanges (Bulk Inserts/Updates)
+
+`SaveChanges()` sends one command per entity, which can be slow for thousands of records. The default sizing for batching is 42 records.
+
+```C#
+// Problem
+foreach (var entity in bigList)
+    context.Entities.Add(entity);
+
+await context.SaveChangesAsync(); // 1000+ inserts individually
+
+// Fix:
+// Use batching Or use specialized bulk libraries (e.g. EFCore.BulkExtensions)
+await context.BulkInsertAsync(bigList);
+
+// If we want to increase the batch size we can do something like this where we initialise our database
+optionsBuilder.UseSqlServer(connectionString, sqlBuilder => sqlBuilder.MaxBatchSize(100));
+```
+--- 
+More include 
+
+- Projection of Entire Graphs
+- Lack of Caching / Repeated Queries
+- Poor Transaction Management
+- Too Many Interceptors / Logging Overhead
+
+When using SQL Server, one way to help improve queries is using the tooling included. First we can connect the `Profiler` to the database and dump out some trace files. We can then feed this into the `Tuning Advisor` and do some processing on it and will tell us what kind of changes we can make to improve performance.
 
 ## Sending Emails
 
@@ -8198,7 +8691,7 @@ spf.protection.outlook.com      text =
 
 ### 2. DKIM (DomainKeys Identified Mail)
 
-**Purpose:** Ensures your email content hasn’t been altered and really came from your domain.
+**Purpose:** Ensures your email content hasn't been altered and really came from your domain.
 
 **How it works:**
 - When you send an email, your mail server adds a **DKIM signature** (a cryptographic hash of the email) using a **private key**.
@@ -8215,18 +8708,18 @@ Value: v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQE...
 - `selector1` → allows key rotation.
 - `p=` → your public key.
 
-**Why it matters:** DKIM confirms that the message wasn’t forged or tampered with in transit.
+**Why it matters:** DKIM confirms that the message wasn't forged or tampered with in transit.
 
 ---
 
 ### 3. DMARC (Domain-based Message Authentication, Reporting, and Conformance)
 
-**Purpose:** Tells recipients’ mail servers what to do if SPF and/or DKIM checks fail, and provides reports.
+**Purpose:** Tells recipients' mail servers what to do if SPF and/or DKIM checks fail, and provides reports.
 
 **How it works:**
 - DMARC is another **DNS TXT record**.
 - It sets a policy for handling failed checks: accept, quarantine, or reject.
-- It can send **daily reports** showing who’s sending mail using your domain.
+- It can send **daily reports** showing who's sending mail using your domain.
 
 **Example DMARC record:**
 
@@ -8253,8 +8746,8 @@ You can use record generators to help with this part. one example is by Mimecast
 
 **Analogy (Airport Security):**
 - **SPF** → Checks if the passenger is on the approved list.
-- **DKIM** → Confirms their ID matches and hasn’t been altered.
-- **DMARC** → Decides to let them in, send them to security, or deny entry — and logs the event.
+- **DKIM** → Confirms their ID matches and hasn't been altered.
+- **DMARC** → Decides to let them in, send them to security, or deny entry and logs the event.
 
 ---
 
@@ -9934,7 +10427,7 @@ In the previous section, we went through setting up `MVVM` ourselves. There is a
 dotnet add package CommunityToolkit.Mvvm
 ```
 
-The CommunityToolkit.Mvvm package is a huge productivity booster for MVVM in .NET MAUI. It provides source generators and attributes so you don’t have to write all the boilerplate `INotifyPropertyChanged`, commands, etc. yourself.
+The CommunityToolkit.Mvvm package is a huge productivity booster for MVVM in .NET MAUI. It provides source generators and attributes so you don't have to write all the boilerplate `INotifyPropertyChanged`, commands, etc. yourself.
 
 In this library, we use Attributes to simplify the code.
 - [RelayCommand]
@@ -10417,7 +10910,7 @@ public partial class CalendarHandler : ViewHandler<ICalendarView, UICalendarView
     // Whenever the FirstDayOfWeek property changes in your MAUI control (or during initial setup), this mapper runs and:
     // Reads the .NET property (virtualView.FirstDayOfWeek).
     // Converts it to the numeric value expected by iOS.
-    // Updates the native iOS calendar’s FirstWeekDay so the displayed calendar starts the week on the correct day.
+    // Updates the native iOS calendar's FirstWeekDay so the displayed calendar starts the week on the correct day.
 	static void MapFirstDayOfWeek(CalendarHandler handler, ICalendarView virtualView)
 	{
 		handler.PlatformView.Calendar.FirstWeekDay = (nuint)virtualView.FirstDayOfWeek;
