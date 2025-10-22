@@ -36,6 +36,7 @@
     - [Events](#events)
     - [Threads](#threads)
     - [Background Workers](#background-workers)
+    - [With Expression](#with-expression)
 - [Dotnet CLI Tips And References](#dotnet-cli-tips-and-references)
     - [Create A New Solution](#create-a-new-solution) 
     - [Add New Web API Project](#add-new-web-api-project)
@@ -96,6 +97,8 @@
     - [Setting Up Swagger](#setting-up-swagger)
     - [Adding Swagger UI Or Scalar In Dotnet 9](#adding-swagger-ui-or-scalar-in-dotnet-9)
     - [Implementing XSRF Tokens](#implementing-xsrf-tokens)
+    - [Returning Problem Details](#returning-problem-details)
+    - [Model Binding](#model-binding)
 - [Authentication & Authorisation With Identity & Razor Pages](#authentication--authorisation-with-identity--razor-pages)
     - [Install](#install)
     - [Configure The Database Connection](#configure-the-database-connection)
@@ -1777,6 +1780,48 @@ public class MainForm : Form
 // Entry point
 Application.Run(new MainForm());
 ```
+
+### With Expression
+
+The `with` expression, introduced in C# 9 creates a copy of an existing immutable object while changing one or more of it's properties.
+
+```C#
+app.MapPost("/customers", (Customer customer) =>
+{
+    var createdCustomer = customer with { Id = Guid.NewGuid() };
+    return Results.Created($"/customers/{createdCustomer.Id}", createdCustomer);
+});
+
+public record Customer(Guid Id, string Name, string Email);
+```
+
+- `customer` itself is not modified (immutability).
+- The result (`createdCustomer`) is a new object.
+
+The with expression is:
+
+- Common and idiomatic when working with records (introduced in C# 9).
+- Less common with regular classes (because with only works with record types by default).
+
+It's used frequently in:
+
+- Domain models that emphasize immutability (e.g., DDD, clean architecture).
+- Functional-style programming in C#.
+- Minimal APIs or ASP.NET Core apps where DTOs or records are passed around.
+
+Use it when:
+
+- You are using immutable records (e.g., record or record struct).
+- You want clear, functional-style updates to immutable data.
+- You want to avoid accidental mutations of shared objects.
+- You're working with value-based equality (records compare by values, not references).
+
+Avoid it when:
+
+- You're using mutable classes (e.g., normal class with settable properties) the with syntax doesn't work unless you define your own "clone" behavior.
+- You need deep copies (it's a shallow copy).
+- You're in performance-critical code that creates lots of short-lived objects (immutability can increase GC pressure).
+
 
 ## Dotnet CLI Tips And References
 
@@ -5828,6 +5873,183 @@ builder.Services.AddAntiforgery(options =>
 - Token Lifecycle: CSRF tokens are tied to user sessions. Ensure proper logout and token invalidation.
 
 - Exclude CSRF for GET Requests: Since GET requests should not modify data, CSRF protection is typically unnecessary for them.
+
+
+### Returning Problem Details
+
+`ProblemDetails` is a built-in class in ASP.NET Core (Microsoft.AspNetCore.Mvc) that represents machine-readable error details for HTTP responses.
+
+It provides a consistent format for error messages so that clients (like frontend apps or API consumers) can parse and handle errors predictably.
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc7231#section-6.5.1",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Email address is invalid.",
+  "instance": "/customers"
+}
+```
+
+Example using an `[ApiController]`
+
+```C#
+[ApiController]
+[Route("api/[controller]")]
+public class CustomersController : ControllerBase
+{
+    [HttpPost]
+    public IActionResult CreateCustomer(Customer customer)
+    {
+        if (!ModelState.IsValid)
+            return ValidationProblem(ModelState);
+
+        return CreatedAtAction(nameof(GetCustomer), new { id = customer.Id }, customer);
+    }
+
+    [HttpGet("{id}")]
+    public IActionResult GetCustomer(Guid id) => Ok(new { id });
+}
+```
+
+If this fails, then the user recieves this
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc7231#section-6.5.1",
+  "title": "One or more validation errors occurred.",
+  "status": 400,
+  "errors": {
+    "Email": [
+      "The Email field is required."
+    ]
+  },
+  "traceId": "00-2a13d6c5..."
+}
+```
+
+You can configure global `ProblemDetails` behavior with middleware:
+
+```C#
+builder.Services.AddProblemDetails(options =>
+{
+    options.CustomizeProblemDetails = context =>
+    {
+        context.ProblemDetails.Extensions.Add("traceId", context.HttpContext.TraceIdentifier);
+    };
+});
+```
+
+### Model Binding
+
+Model Binding in ASP.NET Core is the process that automatically maps HTTP request data (like form fields, JSON, query strings, route values, or headers) into .NET method parameters or object properties in your controller or Razor Page.
+
+When a request hits your controller action:
+
+- The model binding system looks at each action parameter.
+- It determines where to get the data from (based on attributes, HTTP method, or content type).
+- It reads and converts that data to the correct .NET type.
+- It validates the model (if you use data annotations).
+- It passes the populated object into your action method.
+
+Common Data Sources:
+
+- Route data - [FromRoute]
+- Query string - [FromQuery]
+- Form data - [FromForm]
+- Request body (JSON/XML) - [FromBody]
+- Header values - [FromHeader]
+- Custom services - [FromServices]
+
+Example:
+
+```C#
+[HttpPost("{orderId}")]
+public IActionResult CreateOrder(
+    [FromRoute] int orderId,
+    [FromQuery] bool notify,
+    [FromBody] OrderRequest request)
+{
+    // orderId = 123
+    // notify = true
+    // request.ProductId = 5, request.Quantity = 2
+    ...
+}
+```
+
+Model Validation Integration:  
+
+```C#
+// Create a model
+public class RegisterModel
+{
+    [Required]
+    public string Username { get; set; }
+
+    [EmailAddress]
+    public string Email { get; set; }
+
+    [Range(18, 120)]
+    public int Age { get; set; }
+}
+
+// In your controller
+[HttpPost]
+public IActionResult Register([FromBody] RegisterModel model)
+{
+    if (!ModelState.IsValid)
+        return BadRequest(ModelState);
+
+    // Valid model
+    return Ok();
+}
+```
+
+Implementing `IValidatableObject` is a great way to add custom validation logic to your models in ASP.NET Core beyond what you can do with `[DataAnnotation]` attributes like `[Required]` or `[Range]`.
+
+```C#
+using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+
+public class RegisterModel : IValidatableObject
+{
+    [Required]
+    public string Name { get; set; }
+
+    public int Age { get; set; }
+
+    public bool SubscribeToNewsletter { get; set; }
+
+    public string? Email { get; set; }
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+    {
+        // Rule 1: Age must be >= 18
+        if (Age < 18)
+        {
+            yield return new ValidationResult(
+                "You must be at least 18 years old.",
+                new[] { nameof(Age) }
+            );
+        }
+
+        // Rule 2: Email required if subscribing
+        if (SubscribeToNewsletter && string.IsNullOrWhiteSpace(Email))
+        {
+            yield return new ValidationResult(
+                "Email is required when subscribing to the newsletter.",
+                new[] { nameof(Email) }
+            );
+        }
+    }
+}
+```
+
+In your controller, model validation will automatically invoke Validate() after DataAnnotation validation.
+
+A good library to use for Validation is FluentValidations.
+
 
 ## Authentication & Authorisation With Identity & Razor Pages
 
