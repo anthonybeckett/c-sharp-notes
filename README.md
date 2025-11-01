@@ -37,6 +37,14 @@
     - [Threads](#threads)
     - [Background Workers](#background-workers)
     - [With Expression](#with-expression)
+    - [Projecting Data To Another Shape](#projecting-data-to-another-shape)
+- [LINQ](#linq)
+    - [Introduction To Linq](#introduction-to-linq)
+    - [Where Clauses](#where-clauses)
+    - [Ordering Data](#ordering-data)
+    - [Custom Comparer](#custom-comparer)
+    - [Deferred Execution](#deferred-execution)
+    - [Fetching Results](#fetching-results)
 - [Dotnet CLI Tips And References](#dotnet-cli-tips-and-references)
     - [Create A New Solution](#create-a-new-solution) 
     - [Add New Web API Project](#add-new-web-api-project)
@@ -63,6 +71,7 @@
     - [Abstracting Dependency Injection Away From Program.cs](#abstracting-dependency-injection-away-from-programcs)
 - [Clean Architecture & DDD](#clean-architecture--ddd)
     - [Introduction](#introduction)
+    - [Installing CLI Template](#installing-cli-template)
     - [Layer Breakdown Examples](#layer-breakdown-examples)
     - [Setting Up A Project](#setting-up-a-project)
     - [Presentation Layer](#presentation-layer)
@@ -99,6 +108,7 @@
     - [Implementing XSRF Tokens](#implementing-xsrf-tokens)
     - [Returning Problem Details](#returning-problem-details)
     - [Model Binding](#model-binding)
+    - [Configuration](#configuration)
 - [Authentication & Authorisation With Identity & Razor Pages](#authentication--authorisation-with-identity--razor-pages)
     - [Install](#install)
     - [Configure The Database Connection](#configure-the-database-connection)
@@ -1823,6 +1833,281 @@ Avoid it when:
 - You're in performance-critical code that creates lots of short-lived objects (immutability can increase GC pressure).
 
 
+## LINQ
+
+### Introduction To Linq
+
+LINQ (Language Integrated Query) is one of the most powerful and elegant features in C#.
+It lets you query, filter, and transform data in a declarative, SQL-like way but using strongly typed C# code instead of strings.
+
+Some benefits include:
+
+- Eliminates manual loops and conditionals.
+- Greatly improves readability and maintainability.
+- Type-safe and compiler-checked.
+- Works seamlessly with Entity Framework Core.
+- Reduces the need for hand-written SQL or boilerplate code.
+
+### Where Clauses
+
+In LINQ, the where clause is used to filter data. It lets you select only the elements that satisfy a given boolean condition.
+
+It works just like an if statement inside a loop, but written declaratively.
+
+```C#
+// Model
+var people = new List<Person>
+{
+    new Person { Name = "Alice", Age = 25 },
+    new Person { Name = "Bob", Age = 17 },
+    new Person { Name = "Charlie", Age = 32 }
+};
+
+// Query syntax example
+var adults = from p in people
+             where p.Age >= 18
+             select p;
+
+// Fluent Syntax
+var adults = people
+    .Where(p => p.Age >= 18)
+    .ToList();
+```
+
+If we need to use multiple where clauses we can do so like this:
+
+```C#
+// Query based
+var result = from p in people
+             where p.Age >= 18 && p.Name.StartsWith("A")
+             select p;
+
+// We can also use multiple where conditions instead of using ampersands
+var result = from p in people
+             where p.Age >= 18 
+             where p.Name.StartsWith("A")
+             select p;
+
+// Fluent syntax
+var result = people
+    .Where(p => p.Age >= 18 && p.Name.StartsWith("A"));
+
+// Multiple where examples
+var result = people
+    .Where(p => p.Age >= 18)
+    .Where(p => p.Name.StartsWith("A"))
+```
+
+### Ordering Data
+
+To order data, we can use `orderby/OrderBy()`.
+
+```C#
+// Model
+var songs = new List<Song>
+{
+    new Song { Title = "Electric Feel", Artist = "MGMT", Year = 2007, Plays = 5200000 },
+    new Song { Title = "Yellow Submarine", Artist = "The Beatles", Year = 1966, Plays = 8800000 },
+    new Song { Title = "Lose Yourself", Artist = "Eminem", Year = 2002, Plays = 15000000 },
+    new Song { Title = "Bad Guy", Artist = "Billie Eilish", Year = 2019, Plays = 12000000 },
+    new Song { Title = "Clocks", Artist = "Coldplay", Year = 2002, Plays = 7800000 }
+};
+
+// Order by with query syntax
+var orderedByYear = from s in songs
+                    orderby s.Year
+                    select s;
+
+// Order by with fluent syntax
+var orderedByYear = songs.OrderBy(s => s.Year);
+
+// Grouping multiple group by query syntax
+var sortedSongs = from s in songs
+                  orderby s.Artist, s.Title
+                  select s;
+
+// Grouping multiple group bys with fluent syntax
+var sortedSongs = songs
+    .OrderBy(s => s.Artist)
+    .ThenBy(s => s.Title);
+
+// Order by descending query syntax
+var popularSongs = from s in songs
+                   orderby s.Plays descending
+                   select s;
+
+// Order by descending fluent syntax
+var popularSongs = songs
+    .OrderByDescending(s => s.Plays);
+```
+
+### Custom Comparer
+
+A custom comparer in LINQ (or in general .NET collections) is a powerful way to control how items are sorted or compared when the default behavior isn't enough. This does only work in the fluent syntax.
+
+You do this by implementing one of these interfaces:
+
+- `IComparer<T>` - used for sorting (e.g. `OrderBy`, `Sort`, etc.)
+- `IEqualityComparer<T>` - used for equality checks (e.g. `Distinct`, `GroupBy`, `Except`)
+
+```C#
+// Model
+var songs = new List<Song>
+{
+    new Song { Title = "Electric Feel", Artist = "MGMT", Plays = 5200000 },
+    new Song { Title = "Bad Guy", Artist = "Billie Eilish", Plays = 12000000 },
+    new Song { Title = "Yellow Submarine", Artist = "The Beatles", Plays = 8800000 },
+    new Song { Title = "Clocks", Artist = "Coldplay", Plays = 7800000 },
+    new Song { Title = "Another One Bites The Dust", Artist = "Queen", Plays = 15000000 }
+};
+
+// Custom comparer
+public class SongTitleLengthComparer : IComparer<Song>
+{
+    public int Compare(Song? x, Song? y)
+    {
+        if (x == null || y == null)
+            return 0;
+
+        // Compare by title length
+        int lengthComparison = x.Title.Length.CompareTo(y.Title.Length);
+
+        // If same length, fallback to alphabetical order
+        if (lengthComparison == 0)
+            return string.Compare(x.Title, y.Title, StringComparison.OrdinalIgnoreCase);
+
+        return lengthComparison;
+    }
+}
+
+// Using the custom comparer in LINQ
+var orderedSongs = songs.OrderBy(s => s, new SongTitleLengthComparer());
+```  
+
+### Deferred Execution
+
+Deferred execution means that a LINQ query is not executed immediately when it's defined.
+It's only executed later, when you actually iterate over the results.
+
+A LINQ query executes when you enumerate it. That is, when you:
+
+- Use a foreach loop
+
+- Call methods like:
+    - `.ToList()`
+    - `.ToArray()`
+    - `.Count()`
+    - `.First()`
+    - `.Sum()`
+    - `.Any()`
+
+```C#
+var numbers = new List<int> { 1, 2, 3, 4, 5 };
+
+// Define query (not executed yet)
+var evens = numbers.Where(n => n % 2 == 0);
+
+// Change the source before executing
+numbers.Add(6);
+
+// Execute query (now it runs)
+foreach (var n in evens)
+{
+    Console.WriteLine(n);
+}
+```
+
+Use deferred execution when you want a query that always reflects the current state of the data.
+
+Use immediate execution when you need a fixed snapshot of results (e.g., for logging or caching).
+
+### Fetching Results
+
+To fetch all results when using LINQ we can use the `select` syntax or method.
+
+```C#
+// Fetching all results using query syntax
+var allSongs = from s in songs
+               select s;
+
+// Fetching all results using fluent syntax
+var allSongs = songs.Select(s => s);
+
+// Fetching all filtered results
+var coldplaySongs = songs.Where(s => s.Artist == "Coldplay");
+
+foreach (var s in coldplaySongs)
+    Console.WriteLine(s.Title);
+
+// Fetching all results as a dictionary
+var result = songs.ToDictionary(
+    song => song.id,
+    song => song.Title
+);
+
+foreach (var songId in result.Keys) {
+    Console.WriteLine(result[songId]);
+}
+```
+
+To fetch a single result, we can use methods like `First()`, `Single()`, `Last()` and others.
+
+```C#
+// Example fetching the first result
+var firstColdplaySong = songs.First(s => s.Artist == "Coldplay");
+Console.WriteLine(firstColdplaySong.Title);
+
+// Example fetching the first result and avoiding exceptions
+var firstBeatlesSong = songs.FirstOrDefault(s => s.Artist == "The Beatles");
+
+// Example when using single()
+// Note if there is more than one result, it will throw an exception
+var findSongById = songs.Single(s => s.Id == 1);
+```
+
+### Projecting Data To Another Shape
+
+There is often times we don't need to return every column in a dataset and instead only want to select a few. We can do this by using the `SELECT/select()` syntax.
+
+```C#
+// If we want to select one field using query syntax
+var results = from s in songs
+              select s.Title
+
+// If we want to select multiple fields using query syntax
+var results = from s in songs
+              select new { s.Title, s.Artist, s.Year };
+
+// We can also do something similar using the fluent syntax
+var results = songs.Select(s => new { s.Title, s.Artist, s.Year });
+
+// Mapping to a tuple
+var songTuples = songs.Select(s => (s.Title, s.Artist));
+
+foreach (var (title, artist) in songTuples)
+{
+    Console.WriteLine($"{title} by {artist}");
+}
+```
+
+We can also map it to a model, DTO or ViewModel
+
+```C#
+// Create a model
+public class SongInfo
+{
+    public string Title { get; set; }
+    public string Artist { get; set; }
+}
+
+// Map our results to this model structure
+var songInfos = songs.Select(s => new SongInfo
+{
+    Title = s.Title,
+    Artist = s.Artist
+});
+```
+
 ## Dotnet CLI Tips And References
 
 ### Create A New Solution
@@ -2889,6 +3174,22 @@ Folder & File Structure Example
 │── MyProject.sln
 
 ```
+
+### Installing CLI Template
+
+To make the set up a bit easier, we can use a template created by Steve Smith which can be found here: https://github.com/ardalis/CleanArchitecture
+
+We can install the template using this command: 
+
+```bash
+dotnet new install Ardalis.CleanArchitecture.Template
+```
+
+We can then create a new project using a command like this
+
+```bash
+dotnet new clean-arch -o Tips.Website --aspire
+```  
 
 ### Layer Breakdown Examples
 
@@ -6050,6 +6351,28 @@ In your controller, model validation will automatically invoke Validate() after 
 
 A good library to use for Validation is FluentValidations.
 
+### Configuration
+
+The best way to set up application settings from `AppSettings.json` etc is to create a class or record with the parameters we want to introduice from the file and then instaniate them in our `Program.cs` or some configuration file to map from our json file to the class/record.
+
+```C#
+// Create a new class or record
+public record MailSettings(string Server, int Port);
+
+// In our Program.cs or abstraction
+var mailSettings = builder.Configuration.GetSection(nameof(MailSettings)).Get<MailSettings>();
+builder.Services.AddSingleton(mailSettings);
+```
+
+You may also see sometimes that some developers inject `IConfiguration` into the class then pick it out using `_config["MailSettings:Port"]` but this can be hard to mock when it comes to testing. It may also need extra checks to make sure a value is set.
+
+This is the order in which different configuration providers take recedence from highest to lowest:
+
+- Command-line args
+- Environment variables
+- User secrets (Development)
+- appsettings.{Environment}.json
+- appsettings.json
 
 ## Authentication & Authorisation With Identity & Razor Pages
 
