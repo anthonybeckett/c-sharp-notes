@@ -37,7 +37,6 @@
     - [Threads](#threads)
     - [Background Workers](#background-workers)
     - [With Expression](#with-expression)
-    - [Projecting Data To Another Shape](#projecting-data-to-another-shape)
 - [LINQ](#linq)
     - [Introduction To Linq](#introduction-to-linq)
     - [Where Clauses](#where-clauses)
@@ -45,6 +44,8 @@
     - [Custom Comparer](#custom-comparer)
     - [Deferred Execution](#deferred-execution)
     - [Fetching Results](#fetching-results)
+    - [Projecting Data To Another Shape](#projecting-data-to-another-shape)
+    - [Partial Results](#partial-results)
 - [Dotnet CLI Tips And References](#dotnet-cli-tips-and-references)
     - [Create A New Solution](#create-a-new-solution) 
     - [Add New Web API Project](#add-new-web-api-project)
@@ -2107,6 +2108,84 @@ var songInfos = songs.Select(s => new SongInfo
     Artist = s.Artist
 });
 ```
+
+### Partial Results
+
+Partial results simply means retrieving a subset of the data rather than the entire collection or query result.
+
+This is extremely common in:
+
+- Pagination (e.g. showing only 10 songs per page)
+- Early termination (e.g. stop when you find what you need)
+- Streaming (deferred execution means you can process as you go)
+
+These are the most common ways to fetch partial results.
+
+```C#
+// Using the Take() method to get the first two results
+var firstTwo = songs.Take(2);
+
+// Using TakeLast() to take the last 2 results
+var lastTwo = songs.TakeLast(2);
+
+foreach (var s in firstTwo)
+    Console.WriteLine(s.Title);
+
+// Using the skip then take methods
+var nextTwo = songs.Skip(2).Take(2);
+
+foreach (var s in nextTwo)
+    Console.WriteLine(s.Title);
+
+// Using the TakeWhile() method to get results which meet the condition
+// There is also a SkipWhile() which does the opposite
+var popularThreshold = songs.TakeWhile(s => s.Plays < 10_000_000);
+
+foreach (var s in popularThreshold)
+    Console.WriteLine(s.Title);
+```
+
+We can also chunk data which will fetch back our results as an array.
+
+```C#
+var sourceMovies = Repository.GetAllMovies();
+
+var query = 
+    from movie in sourceMovies
+    where movie.Producers.Count > 1
+    select movie;
+
+var chunks = query.Chunk(5);
+
+foreach (var chunk in chunks) {
+    Console.WriteLine("Chunk:");
+
+    foreach (var movie in chunk) {
+        Console.WriteLine(movie);
+    }
+}
+```
+
+Grouping in LINQ is used to organize elements that share a common key (like an artist, category, or year).
+
+```C#
+// Grouping with the query syntax
+var groupedByArtist =
+    from s in songs
+    group s by s.Artist into artistGroup
+    select artistGroup;
+
+// Grouping with fluent syntax
+var groupedByYear = songs.GroupBy(s => s.Year);
+
+foreach (var yearGroup in groupedByYear)
+{
+    Console.WriteLine($"Year: {yearGroup.Key}");
+    foreach (var s in yearGroup)
+        Console.WriteLine($"  {s.Title} by {s.Artist}");
+}
+```
+
 
 ## Dotnet CLI Tips And References
 
