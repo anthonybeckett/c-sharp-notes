@@ -46,6 +46,13 @@
     - [Fetching Results](#fetching-results)
     - [Projecting Data To Another Shape](#projecting-data-to-another-shape)
     - [Partial Results](#partial-results)
+    - [Deduplicating Data](#deduplicating-data)
+    - [Aggregate Functions](#aggregate-functions)
+    - [Set Operations](#set-operations)
+    - [Select Many](#select-many)
+    - [Joins](#joins)
+    - [Creating Our Own IEnumerable Methods](#creating-our-own-ienumerable-methods)
+    - [PLINQ](#plinq)
 - [Dotnet CLI Tips And References](#dotnet-cli-tips-and-references)
     - [Create A New Solution](#create-a-new-solution) 
     - [Add New Web API Project](#add-new-web-api-project)
@@ -2186,6 +2193,532 @@ foreach (var yearGroup in groupedByYear)
 }
 ```
 
+### Deduplicating Data
+
+We can use Linq to deduplicate data from our data collections easily rather than looping through it all and doing it manually ourselves.
+
+Lets start with a simple example using an array of numbers.
+
+```C#
+int[] sourceItems = [1, 3, 5, 3, 7, 7, 1, 6, 20, 25, 25, 30];
+
+// To see every unique item in this collection
+var result = sourceItems.Distinct();
+```
+
+Another example using a List:
+
+```C#
+var songs = new List<Song>
+{
+    new Song { Title = "Yellow", Artist = "Coldplay" },
+    new Song { Title = "Clocks", Artist = "Coldplay" },
+    new Song { Title = "Levitating", Artist = "Dua Lipa" },
+    new Song { Title = "Don't Stop Me Now", Artist = "Queen" }
+};
+
+// Deduplicate by Artist
+var uniqueArtists = songs.DistinctBy(s => s.Artist);
+
+foreach (var s in uniqueArtists)
+    Console.WriteLine($"{s.Artist} - {s.Title}");
+
+// We can also deduplicate by multiple keys
+var uniqueArtistTitles = songs
+    .DistinctBy(s => new { s.Artist, s.Title });
+```
+
+### Aggregate Functions
+
+Aggregate functions are a core part of LINQ, used to perform summary operations over a collection, like counting, summing, averaging, finding minimums or maximums, and combining values.
+
+```C#
+// Example of counting results
+int totalSongs = songs.Count();
+int coldplaySongs = songs.Count(s => s.Artist == "Coldplay");
+
+// Getting the total number of a certain column
+int totalPlays = songs.Sum(s => s.Plays);
+
+// Getting the average
+double avgPlays = songs.Average(s => s.Plays);
+
+// Min & Max (return a scalar value with the min or max value)
+int maxPlays = songs.Max(s => s.Plays);
+int minPlays = songs.Min(s => s.Plays);
+
+// Min & Max (return the entire object related to the mix of max value)
+int maxPlaySong = songs.MaxBy(s => s.Plays);
+int minPlaySong = songs.MinBy(s => s.Plays);
+
+// Aggregate() is a custom reduction function. It lets you combine elements manually.
+string titles = songs
+    .Select(s => s.Title)
+    .Aggregate((a, b) => a + ", " + b);
+
+// Group & Aggregate
+var avgByArtist = songs
+    .GroupBy(s => s.Artist)
+    .Select(g => new
+    {
+        Artist = g.Key,
+        AveragePlays = g.Average(s => s.Plays)
+    });
+```
+
+### Set Operations
+
+Set operations in LINQ are one of the most useful features when comparing or combining collections.
+
+These operations are modeled after mathematical set theory and are designed to work with distinct elements (duplicates are automatically removed unless otherwise stated).
+
+Set operations in LINQ let you:
+
+- Combine sequences
+- Find differences between them
+- Identify common or unique elements
+
+`Distinct()` - Removes duplicates
+`Union()` - Combines two sequences, removing duplicates
+`Intersect()` - Returns common elements from both sequences
+`Except()` - Returns elements in one sequence but not the other
+`Concat()` - Combines two sequences without removing duplicates
+
+```C#
+// Model to work with
+var rockArtists = new List<string> { "Queen", "Coldplay", "Muse", "Foo Fighters" };
+var popArtists = new List<string> { "Coldplay", "Dua Lipa", "Ed Sheeran", "Adele" };
+
+// Union example
+var allArtists = rockArtists.Union(popArtists);
+
+Console.WriteLine("All Artists (Union):");
+foreach (var artist in allArtists)
+    Console.WriteLine(artist);
+
+// Intersect example
+var crossoverArtists = rockArtists.Intersect(popArtists);
+
+Console.WriteLine("Crossover Artists (Intersect):");
+foreach (var artist in crossoverArtists)
+    Console.WriteLine(artist);
+
+// Except
+var onlyRock = rockArtists.Except(popArtists);
+
+Console.WriteLine("Rock Artists Only (Except):");
+foreach (var artist in onlyRock)
+    Console.WriteLine(artist);
+
+// Concat
+var allArtistsWithDuplicates = rockArtists.Concat(popArtists);
+
+Console.WriteLine("All Artists (Concat):");
+foreach (var artist in allArtistsWithDuplicates)
+    Console.WriteLine(artist);
+
+
+```
+
+### Select Many
+
+`Select()` projects each element of a collection into one new value.
+
+`SelectMany()` projects each element into a collection, and then flattens those collections into a single sequence.
+
+```C#
+// Model
+public class Artist
+{
+    public string Name { get; set; }
+    public List<string> Songs { get; set; }
+}
+
+var artists = new List<Artist>
+{
+    new Artist { Name = "Coldplay", Songs = new List<string> { "Yellow", "Clocks" } },
+    new Artist { Name = "Dua Lipa", Songs = new List<string> { "Levitating", "Physical" } },
+    new Artist { Name = "Queen", Songs = new List<string> { "Bohemian Rhapsody", "Don't Stop Me Now" } }
+};
+
+// Using a normal select then iterating through the data
+var songLists = artists.Select(a => a.Songs);
+
+foreach (var list in songLists)
+{
+    Console.WriteLine(string.Join(", ", list));
+}
+
+// Using SelectMany()
+var allSongs = artists.SelectMany(a => a.Songs);
+
+foreach (var song in allSongs)
+{
+    Console.WriteLine(song);
+}
+
+// SelectMany() with projection
+var artistSongs = artists.SelectMany(
+    artist => artist.Songs,
+    (artist, song) => new { Artist = artist.Name, Song = song }
+);
+
+foreach (var item in artistSongs)
+    Console.WriteLine($"{item.Artist} - {item.Song}");
+
+// Using query syntax
+var artistSongs =
+    from artist in artists
+    from song in artist.Songs
+    select new { artist.Name, Song = song };
+
+foreach (var item in artistSongs)
+    Console.WriteLine($"{item.Name} - {item.Song}");
+```
+
+### Joins
+
+A join combines data from two (or more) collections based on matching keys, just like in SQL.
+
+Lets use this data set for our examples
+
+```C#
+public class Artist
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+}
+
+public class Song
+{
+    public string Title { get; set; }
+    public int ArtistId { get; set; }
+}
+
+var artists = new List<Artist>
+{
+    new Artist { Id = 1, Name = "Coldplay" },
+    new Artist { Id = 2, Name = "Dua Lipa" },
+    new Artist { Id = 3, Name = "Queen" }
+};
+
+var songs = new List<Song>
+{
+    new Song { Title = "Yellow", ArtistId = 1 },
+    new Song { Title = "Clocks", ArtistId = 1 },
+    new Song { Title = "Levitating", ArtistId = 2 },
+    new Song { Title = "Bohemian Rhapsody", ArtistId = 3 }
+};
+```
+
+Inner Joins
+
+```C#
+// Query syntax
+var query =
+    from artist in artists
+    join song in songs
+    on artist.Id equals song.ArtistId
+    select new
+    {
+        Artist = artist.Name,
+        Song = song.Title
+    };
+
+foreach (var item in query)
+    Console.WriteLine($"{item.Artist} - {item.Song}");
+
+// Fluent syntax
+var result = artists.Join(
+    songs,                   // Inner collection
+    artist => artist.Id,     // Outer key selector
+    song => song.ArtistId,   // Inner key selector
+    (artist, song) => new    // Result selector
+    {
+        Artist = artist.Name,
+        Song = song.Title
+    });
+
+foreach (var item in result)
+    Console.WriteLine($"{item.Artist} - {item.Song}");
+```
+
+Group Join (Left Join Pattern)
+
+```C#
+// Query syntax
+var groupJoin =
+    from artist in artists
+    join song in songs
+    on artist.Id equals song.ArtistId into songGroup
+    select new
+    {
+        Artist = artist.Name,
+        Songs = songGroup
+    };
+
+foreach (var item in groupJoin)
+{
+    Console.WriteLine(item.Artist);
+    foreach (var song in item.Songs)
+        Console.WriteLine($"  - {song.Title}");
+}
+
+// Fluent syntax
+var leftJoin = artists
+    .GroupJoin(
+        songs,                     // Inner collection
+        artist => artist.Id,        // Outer key selector
+        song => song.ArtistId,      // Inner key selector
+        (artist, songGroup) => new  // Result selector
+        {
+            Artist = artist,
+            Songs = songGroup
+        })
+    .SelectMany(
+        x => x.Songs.DefaultIfEmpty(),   // Ensures left join behavior
+        (x, song) => new
+        {
+            Artist = x.Artist.Name,
+            Song = song?.Title ?? "(No Songs)"
+        });
+
+foreach (var item in leftJoin)
+    Console.WriteLine($"{item.Artist} - {item.Song}");
+```
+
+Left Outer Join (Include Artists with No Songs)
+
+```C#
+// Query syntax
+var leftJoin =
+    from artist in artists
+    join song in songs
+    on artist.Id equals song.ArtistId into songGroup
+    from subSong in songGroup.DefaultIfEmpty()
+    select new
+    {
+        Artist = artist.Name,
+        Song = subSong?.Title ?? "(No Songs)"
+    };
+
+foreach (var item in leftJoin)
+    Console.WriteLine($"{item.Artist} - {item.Song}");
+
+// Fluent syntax example (doesn't have the function)
+var leftJoin = artists
+    .GroupJoin(
+        songs,                     // Inner collection
+        artist => artist.Id,        // Outer key selector
+        song => song.ArtistId,      // Inner key selector
+        (artist, songGroup) => new  // Result selector
+        {
+            Artist = artist,
+            Songs = songGroup
+        })
+    .SelectMany(
+        x => x.Songs.DefaultIfEmpty(),   // Ensures left join
+        (x, song) => new
+        {
+            Artist = x.Artist.Name,
+            Song = song?.Title ?? "(No Songs)"
+        });
+
+foreach (var item in leftJoin)
+    Console.WriteLine($"{item.Artist} - {item.Song}");
+```
+
+### Creating Our Own IEnumerable Methods
+
+Let's create our own methods to use with LINQ with IEnumberables.
+
+Lets start with this class. The `MyWhere` & `MyFirstOrDefault` methods don't yet exist so we will write our own.
+
+```C#
+public class EnumerableExample : QueryRunner
+{
+    public override void Run()
+    {
+        HomeLinqMethods();
+    }
+
+    void HomeLinqMethods()
+    {
+        var allMovies = Repository.GetAllMovies();
+
+        var result = allMovies
+            .MyWhere(movie => movie.Phase == 4)
+            .MyFirstOrDefault();
+    }
+}
+```
+
+Linq Methods are basically extension methods, so we can implement them like this.
+
+```C#
+public static class MyLinqMethods
+{
+    public static IEnumerable<T> MyWhere<T>(this IEnumerable<T> source, Predicate<T> condition)
+    {
+        foreach (var sourceItem in source) {
+            if (condition(sourceItem)) {
+                yield return sourceItem;
+            }
+        }
+    }
+
+    public static T? MyFirstOrDefault(this IEnumerable<T> source)
+    {
+        foreach (var sourceItem in source) {
+            return sourceItem;
+        }
+
+        return default;
+    }
+}
+```
+
+### PLINQ
+
+PLINQ stands for Parallel LINQ. It's an extension of LINQ that runs queries in parallel, taking advantage of multiple CPU cores to speed up operations on large datasets.
+
+PLINQ is part of the `System.Linq` and `System.Linq.Parallel` namespaces and is built on top of the Task Parallel Library (TPL).
+
+When working with large collections, regular LINQ runs sequentially iterating one element at a time.
+
+PLINQ splits the data source into multiple partitions, processes each one in parallel threads, and then merges the results.
+
+Good use cases:
+
+- CPU-bound operations
+- Expensive calculations or transformations
+- Large data sets that can be processed independently
+
+Not good for:
+
+- Small collections (parallel overhead may slow it down)
+- Queries with lots of shared state or side effects (thread safety issues)
+- Database queries (EF Core's LINQ is translated to SQL. PLINQ works only on in-memory data)
+
+```C#
+using System;
+using System.Linq;
+
+class Program
+{
+    static void Main()
+    {
+        var numbers = Enumerable.Range(1, 20);
+
+        var squares = numbers
+            .AsParallel()
+            .Select(n =>
+            {
+                Console.WriteLine($"Processing {n} on thread {Environment.CurrentManagedThreadId}");
+                return n * n;
+            })
+            .ToList();
+
+        foreach (var s in squares)
+            Console.WriteLine(s);
+    }
+}
+```
+
+You may notice the results do appear out of order because of how fast some are processed compared to others. This can be things like Intel's Big/Little design architecture with P-Cores and E-Cores etc.
+
+To keep the order, we can sacrifice a little bit of time and use `AsOrdered()`
+
+```C#
+var orderedSquares = numbers
+    .AsParallel()
+    .AsOrdered()
+    .Select(n => n * n)
+    .ToList();
+```
+
+To limit how much processing cores we want to use, we can use `WithDegreeOfParallelism`
+
+```C#
+var result = numbers
+    .AsParallel()
+    .WithDegreeOfParallelism(2)
+    .Select(n => n * n)
+    .ToList();
+```
+
+PLINQ wraps exceptions inside an AggregateException, because multiple threads may fail simultaneously.
+
+```C#
+try
+{
+    var result = numbers.AsParallel().Select(n =>
+    {
+        if (n == 10) throw new Exception("Bad number!");
+        return n;
+    }).ToList();
+}
+catch (AggregateException ex)
+{
+    foreach (var e in ex.InnerExceptions) {
+        Console.WriteLine(e.Message);
+    }
+}
+```
+
+If we want to keep the parallelism going instead of looping through each item at the end, we can use the `ForAll()` method which will execute an action on each element as soon as it's produced.
+
+```C#
+var result = numbers
+    .AsParallel()
+    .Select(number => number * number)
+    .ForAll(number => Console.WriteLine(number));
+```
+
+When you run a PLINQ query, results from different threads need to be merged back into a single sequence. The merge options control when and how those results are made available to your program.
+
+```C#
+using System;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+class Program
+{
+    static void Main()
+    {
+        var songs = Enumerable.Range(1, 10).Select(i => $"Song {i}");
+
+        Console.WriteLine("=== FullyBuffered ===");
+        RunWithMergeOption(songs, ParallelMergeOptions.FullyBuffered);
+
+        Console.WriteLine("\n=== AutoBuffered ===");
+        RunWithMergeOption(songs, ParallelMergeOptions.AutoBuffered);
+
+        Console.WriteLine("\n=== NotBuffered ===");
+        RunWithMergeOption(songs, ParallelMergeOptions.NotBuffered);
+    }
+
+    static void RunWithMergeOption(IEnumerable<string> songs, ParallelMergeOptions option)
+    {
+        var results = songs
+            .AsParallel()
+            .WithMergeOptions(option)
+            .Select(song =>
+            {
+                // Simulate CPU-heavy work
+                Thread.Sleep(500);
+                Console.WriteLine($"Processed {song} on thread {Environment.CurrentManagedThreadId}");
+                return $"{song} - done";
+            });
+
+        foreach (var result in results)
+        {
+            Console.WriteLine($"Result available: {result}");
+        }
+    }
+}
+```
 
 ## Dotnet CLI Tips And References
 
