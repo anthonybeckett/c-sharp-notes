@@ -53,6 +53,16 @@
     - [Joins](#joins)
     - [Creating Our Own IEnumerable Methods](#creating-our-own-ienumerable-methods)
     - [PLINQ](#plinq)
+- [Reflection](#reflection)
+    - [What Is Reflection](#what-is-reflection)
+    - [Looking Up Types](#looking-up-types)
+    - [Filtering Type Information](#filtering-type-information)
+    - [Assembly Scanning](#assembly-scanning)
+    - [Binding Flags](#binding-flags)
+    - [Fetching Values](#fetching-values)
+    - [Calling Methods](#calling-methods)
+    - [Activator Class](#activator-class)
+    - [Source Generators]()
 - [Dotnet CLI Tips And References](#dotnet-cli-tips-and-references)
     - [Create A New Solution](#create-a-new-solution) 
     - [Add New Web API Project](#add-new-web-api-project)
@@ -2719,6 +2729,583 @@ class Program
     }
 }
 ```
+
+## Reflection
+
+### What Is Reflection
+
+Reflection in C# is the ability for a program to inspect and interact with its own metadata at runtime.
+
+That means your program can:
+
+- Discover types (classes, structs, interfaces, etc.)
+- Examine methods, properties, fields, attributes, and constructors
+- Invoke methods or access members dynamically
+- Create instances of types even if you don't know their names until runtime
+
+It's part of the `System.Reflection` namespace.
+
+Reflection is powerful but should be used carefully. It's slower and less safe than regular code.
+
+However, it's essential for dynamic, flexible, or meta-programming scenarios.
+
+An example of reflection
+
+```C#
+// Lets create a Playable Attribute
+[AttributeUsage(AttributeTargets.Method)]
+public class PlayableAttribute : Attribute { }
+
+// Create a class to work with assigning our playable to one of our methods
+public class MusicLibrary
+{
+    [Playable]
+    public void PlaySong() => Console.WriteLine("Playing song...");
+
+    public void SkipSong() => Console.WriteLine("Skipping...");
+}
+
+// Use reflection to find all methods in our MusicLibrary class with the Playable attribute
+var methods = typeof(MusicLibrary)
+    .GetMethods()
+    .Where(m => m.GetCustomAttribute<PlayableAttribute>() != null);
+
+// Print out what we find, but normally you would use this in better ways
+foreach (var m in methods)
+    Console.WriteLine($"Playable method: {m.Name}");
+
+```
+
+### Looking Up Types
+
+In C#, looking up types using reflection means finding information about a type like a class, struct, or interface, at runtime, even if you didn't hard-code it.
+
+You can look up types in several ways:
+
+- From a known type: typeof(MyClass)
+- From an object instance: obj.GetType()
+- From a type name (string): Type.GetType("Namespace.MyClass")
+- From an assembly: Assembly.GetExecutingAssembly().GetTypes()
+
+Once you have the Type object, you can inspect:
+
+- Properties (GetProperties())
+- Methods (GetMethods())
+- Fields (GetFields())
+- Constructors (GetConstructors())
+
+```C#
+public class Song
+{
+    public string Title { get; set; }
+    public string Artist { get; set; }
+
+    public void Play() => Console.WriteLine($"Playing {Title} by {Artist}");
+}
+
+using System;
+using System.Reflection;
+
+class Program
+{
+    static void Main()
+    {
+        // Get the Type object for the Song class
+        // Note: typeof only works at compile time so it will not work 
+        // with things like dynamically loading .dll libraries
+        Type songType = typeof(Song);
+
+        // Print its name and namespace
+        Console.WriteLine($"Type Name: {songType.Name}");
+        Console.WriteLine($"Namespace: {songType.Namespace}");
+
+        // List all public properties
+        Console.WriteLine("\nProperties:");
+        foreach (var prop in songType.GetProperties())
+            Console.WriteLine($" - {prop.Name} ({prop.PropertyType.Name})");
+
+        // List all methods declared in this class
+        Console.WriteLine("\nMethods:");
+        foreach (var method in songType.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            Console.WriteLine($" - {method.Name}");
+    }
+}
+```
+
+In the example above, we mention `typeof()` only works at compile time. If we need to run something dynamically we can use something like `Type.GetType()`
+
+```C#
+// Getting types by name
+var typeByName = Type.GetType("MyDynamicClass");
+
+// If we have nested classes inside our class we can access them like this
+var nestedType = Type.GetType("MyDynamicClass+MyDynamicSubClass");
+
+// We can also find by namespace
+var typeFromNamespace = Type.GetType("ExampleNamespace.MyDynamicClass");
+
+// We can also get types from the current executing assembly
+var typeFromAssembly = Assembly.GetExecutingAssembly().GetType("MyDynamicClass");
+
+// We can also get all types from an assembly
+var allTypesFromAssembly = Assembly.GetExecutingAssembly().GetTypes();
+```
+
+### Filtering Type Information
+
+When you use reflection to get type information, you often get all members including every property, method, field, etc.
+
+Filtering type information means using reflection to find only the members you care about.
+
+For example:
+
+- Only public methods
+- Only properties of a certain type
+- Only members with a specific attribute
+- Only methods that match a naming pattern
+
+This is very common in frameworks like `ASP.NET`, `Entity Framework`, or testing libraries (they use reflection to find things like `[Controller]`, `[Key]`, `[Test]`, etc.).
+
+```C#
+using System;
+using System.Linq;
+using System.Reflection;
+
+[AttributeUsage(AttributeTargets.Method)]
+public class CommandAttribute : Attribute { }
+
+public class MusicPlayer
+{
+    [Command]
+    public void Play() { }
+
+    public void Pause() { }
+
+    [Command]
+    public void Stop() { }
+
+    private void Reset() { }
+
+    public string Version => "1.0";
+}
+
+class Program
+{
+    static void Main()
+    {
+        Type type = typeof(MusicPlayer);
+
+        // Get all instance methods declared on this type
+        var publicMethods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+
+        Console.WriteLine("Public Methods:");
+        foreach (var method in publicMethods) {
+            Console.WriteLine($" - {method.Name}");
+        }
+
+        // Get all methods which return void
+        var voidMethods = type
+            .GetMethods()
+            .Where(m => m.ReturnType == typeof(void));
+
+        // Get all functions with a Command attribute
+        var commandMethods = type
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Where(m => m.GetCustomAttribute<CommandAttribute>() != null);
+    }
+}
+```
+
+### Assembly Scanning
+
+Assembly scanning is using reflection to look through all the types (classes, interfaces, etc.) in one or more assemblies, usually to automatically find types that meet some criteria.
+
+Example:
+
+```C#
+// Let's say we have these classes
+public interface IAudioEffect
+{
+    void Process();
+}
+
+public class Reverb : IAudioEffect
+{
+    public void Process() => Console.WriteLine("Applying reverb...");
+}
+
+public class Echo : IAudioEffect
+{
+    public void Process() => Console.WriteLine("Applying echo...");
+}
+
+public class Compressor
+{
+    public void Process() => Console.WriteLine("Compressing...");
+}
+
+// We can use assembly scanning to find all classes that implement the IAudioEffect within this assembly
+using System;
+using System.Linq;
+using System.Reflection;
+
+class Program
+{
+    static void Main()
+    {
+        // Get the currently running assembly
+        Assembly assembly = Assembly.GetExecutingAssembly();
+
+        // Find all types that implement IAudioEffect
+        var effectTypes = assembly
+            .GetTypes()
+            .Where(t => typeof(IAudioEffect).IsAssignableFrom(t)
+                        && t.IsClass                               
+                        && !t.IsAbstract);                          
+
+        Console.WriteLine("Discovered Effects:");
+        foreach (var type in effectTypes)
+        {
+            Console.WriteLine($" - {type.Name}");
+
+            // Create an instance dynamically
+            var effect = (IAudioEffect)Activator.CreateInstance(type)!;
+            effect.Process();
+        }
+    }
+}
+
+// Searching dynamically through a dll file
+Assembly pluginAssembly = Assembly.LoadFrom("Plugins/AudioEffects.dll");
+
+var pluginTypes = pluginAssembly
+    .GetTypes()
+    .Where(t => typeof(IAudioEffect).IsAssignableFrom(t));
+
+// Loading from a directory of assemblies
+static IReadOnlyList<Assembly> LoadAssembliesFromDirectory(string directoryPath)
+{
+    var assemblies = new List<Assembly>();
+    
+    foreach (var file in Directory.EnumerateFiles(directoryPath, '*.dll')) {
+        var assembly Assembly.LoadFrom(file);
+        assemblies.Add(assembly);
+    }
+
+    return assemblies;
+}
+```
+
+### Binding Flags
+
+BindingFlags are an enum in System.Reflection that control which members are returned or accessed when using reflection.
+
+By default, many reflection methods only return public instance members.
+BindingFlags allow you to fine-tune what you want to retrieve: public vs. non-public, static vs. instance, inherited vs. declared-only, etc.
+
+Flags can be combined using the bitwise OR operator (|).
+
+```C#
+type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+```
+
+Example
+
+```C#
+// Example class
+public class ExampleClass
+{
+    public string Name;
+    private int secret;
+
+    public static void Info() { }
+    public void Play() { }
+    private void Reset() { }
+}
+
+Type type = typeof(ExampleClass);
+
+// Get all public instance members (fields, methods, properties)
+var publicInstanceMethods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance);
+
+// Get all private members
+var privateMembers = type.GetMembers(BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+
+// Get all declared members (exclude inherited)
+var declaredMembers = type.GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+
+// Get static members
+var staticMembers = type.GetMembers(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+```
+
+### Fetching Values
+
+`GetValue()` retrieves the current value of a field or property at runtime. For instance members, you pass the object instance and for static members, you pass `null`.
+
+```C#
+using System;
+using System.Reflection;
+
+public class ExampleClass
+{
+    // Instance field
+    public string Name = "DefaultName";
+
+    // Static field
+    public static int Counter = 42;
+
+    // Instance property
+    public int Age { get; set; } = 25;
+
+    // Static property
+    public static string Version { get; set; } = "1.0";
+}
+
+// Accessing instances
+class Program
+{
+    static void Main()
+    {
+        var example = new ExampleClass();
+
+        Type type = typeof(ExampleClass);
+
+        // Instance Field
+        FieldInfo nameField = type.GetField("Name");
+        Console.WriteLine("Instance Field Name: " + nameField.GetValue(example));
+
+        // Instance Property
+        PropertyInfo ageProp = type.GetProperty("Age");
+        Console.WriteLine("Instance Property Age: " + ageProp.GetValue(example));
+
+        // Accessing static members
+        // Static Field
+        FieldInfo counterField = type.GetField("Counter", BindingFlags.Static | BindingFlags.Public);
+        Console.WriteLine("Static Field Counter: " + counterField.GetValue(null));
+
+        // Static Property
+        PropertyInfo versionProp = type.GetProperty("Version", BindingFlags.Static | BindingFlags.Public);
+        Console.WriteLine("Static Property Version: " + versionProp.GetValue(null));
+    }
+}
+```
+
+### Calling Methods
+
+We can find methods in our types and `Invoke` them using reflection.
+
+```C#
+using System;
+using System.Reflection;
+
+public class MusicPlayer
+{
+    public string Name { get; set; }
+
+    public MusicPlayer(string name)
+    {
+        Name = name;
+    }
+
+    public void Play(string song)
+    {
+        Console.WriteLine($"{Name} is playing {song}");
+    }
+
+    public static void Info()
+    {
+        Console.WriteLine("MusicPlayer v1.0");
+    }
+}
+
+class Program
+{
+    static void Main()
+    {
+        Type type = typeof(MusicPlayer);
+
+        // Call an instance of a method dynamically
+        object player = Activator.CreateInstance(type, "MyPlayer")!;
+        MethodInfo playMethod = type.GetMethod("Play")!;
+
+        // The second argument when calling Invoke() is the method parameters.
+        // Pass null for no arguments and an object array listing each argument.
+        playMethod.Invoke(player, ["Bohemian Rhapsody"]);
+
+        // Call a static method dynamically
+        MethodInfo infoMethod = type.GetMethod("Info", BindingFlags.Public | BindingFlags.Static)!;
+
+        infoMethod.Invoke(null, null);
+    }
+}
+```
+
+### Activator Class
+
+The Activator class (in the System namespace) provides methods to create objects at runtime when you don’t know the type at compile time.
+
+It’s part of reflection because it works with Type objects.
+
+There is two common ways to create instances:
+
+- `Activator.CreateInstance(Type type)` - Creates an instance using a Type object (useful when type known only at runtime)
+- Activator.CreateInstance<T>() - Generic version – creates a new instance of type T (known at compile time)
+
+
+```C#
+using System;
+
+public class MusicPlayer
+{
+    public string Name { get; set; }
+
+    public MusicPlayer()
+    {
+        Name = "Default Player";
+    }
+
+    public MusicPlayer(string name)
+    {
+        Name = name;
+    }
+
+    public void Play()
+    {
+        Console.WriteLine($"{Name} is playing music...");
+    }
+}
+
+class Program
+{
+    static void Main()
+    {
+        // Create a new instance using the generic form
+        var player = Activator.CreateInstance<MusicPlayer>();
+
+        Console.WriteLine(player.Name);
+        player.Play();
+
+        // -------------------------------------------------------
+
+        // Get the type dynamically
+        Type type = typeof(MusicPlayer);
+
+        // Create instance using the non-generic Activator method
+        object instance = Activator.CreateInstance(type)!;
+
+        // Cast to correct type if you need to access members
+        MusicPlayer player = (MusicPlayer)instance;
+        player.Play();
+    }
+}
+
+```
+
+### Source Generators
+
+A Source Generator is a special kind of compiler extension that runs at compile time.
+It can analyze your code and generate new C# code that’s added to your project automatically before compilation finishes.
+
+They’re used for:
+
+- Eliminating boilerplate (e.g. auto-generating DTO mappers, serializers, DI registrations)
+- Improving runtime performance by moving work to compile-time
+- Enabling “meta-programming” safely (without reflection at runtime)
+
+Examples in the wild:
+
+- System.Text.Json uses generators for fast serialization.
+- Entity Framework Core uses them for optimized query models.
+- MediatR, AutoMapper, and Dapper can be extended with them.
+
+Very basic example
+
+```bash
+dotnet new classlib -n HelloSourceGenerator
+```
+
+Add a reference to the Roslyn SDK:
+
+```bash
+dotnet add package Microsoft.CodeAnalysis.CSharp
+dotnet add package Microsoft.CodeAnalysis.Analyzers
+```
+
+Create the source generation class
+
+```C#
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Text;
+using System.Text;
+
+namespace HelloSourceGenerator
+{
+    [Generator]
+    public class HelloGenerator : ISourceGenerator
+    {
+        public void Initialize(GeneratorInitializationContext context)
+        {
+            // Optional: hook into compilation events or register syntax receivers
+        }
+
+        public void Execute(GeneratorExecutionContext context)
+        {
+            // Generate simple code
+            string source = @"
+namespace Generated
+{
+    public static class HelloWorld
+    {
+        public static void SayHello()
+        {
+            System.Console.WriteLine(""Hello from Source Generator!"");
+        }
+    }
+}";
+
+            // Add generated code to the compilation
+            context.AddSource("HelloWorld.g.cs", SourceText.From(source, Encoding.UTF8));
+        }
+    }
+}
+```
+
+
+Create a console app and reference the generator project as an analyzer:
+
+```bash
+dotnet new console -n GeneratorDemo
+dotnet add GeneratorDemo.csproj reference ../HelloSourceGenerator/HelloSourceGenerator.csproj
+```
+
+Then edit your `.csproj` file so the reference is treated as an analyzer:
+
+```xml
+<ItemGroup>
+  <ProjectReference Include="..\HelloSourceGenerator\HelloSourceGenerator.csproj"
+                    OutputItemType="Analyzer"
+                    ReferenceOutputAssembly="false" />
+</ItemGroup>
+```
+
+In `Program.cs`:
+
+```C#
+using Generated;
+
+HelloWorld.SayHello();
+```
+
+You can make much more advanced generators:
+
+- Use a ISyntaxReceiver to detect specific syntax patterns (e.g. [GenerateSomething] attributes)
+- Inspect existing code using the Roslyn Semantic Model
+- Generate files conditionally or from external data sources (like JSON or templates)
+
+```C#
+context.SyntaxReceiver = new MySyntaxReceiver();
+```
+
 
 ## Dotnet CLI Tips And References
 
