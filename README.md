@@ -85,6 +85,10 @@
     - [Setting Up Docker For Production & Development Environments](#setting-up-docker-for-production--development-environments)
     - [Docker Issues](#docker-issues)
     - [Docker Images & Tags](#docker-images--tags)
+- [Aspire](#aspire)
+    - [Creating A New Aspire Project](#creating-a-new-aspire-project)
+    - [Adding Aspire To An Existing Application](#adding-aspire-to-an-existing-application)
+    - [Adding Integrations](#adding-integrations)
 - [Architecture](#architecture)
     - [Abstracting Dependency Injection Away From Program.cs](#abstracting-dependency-injection-away-from-programcs)
 - [Clean Architecture & DDD](#clean-architecture--ddd)
@@ -216,9 +220,20 @@
     - [Parallelization](#parallelization)
     - [Advanced Parameterization](#advanced-parameterization)
     - [Testing DateTime](#testing-datetime)
-    - [Code Coverage]()
+    - [Code Coverage](#code-coverage)
 - [Integration Testing](#integration-testing)
+    - [5 Integration Testing Steps](#5-integration-testing-steps)
     - [Setup Notes](#setup-notes)
+    - [Naming Structure](#naming-structure)
+    - [Setup & Teardown](#setup--teardown)
+    - [WebApplication Factory](#webapplication-factory)
+    - [Different Testing Scenarios](#different-testing-scenarios)
+    - [Generating Fakeable Data](#generating-fakeable-data)
+    - [Using Docker For Our Test Database](#using-docker-for-our-test-database)
+    - [Using Wiremock To Create Fake External API's](#using-wiremock-to-create-fake-external-apis)
+    - [Example Of Testing An Authenticated Endpoint](#example-of-testing-an-authenticated-endpoint)
+    - [Removing Background Services](#removing-background-services)
+    - [Testing With Entity Framework](#testing-with-entity-framework)
 - [CI/CD](#cicd)
     - [Setting Up GitHub Actions](#setting-up-github-actions)
     - [GitHub Marketplace](#github-marketplace)
@@ -4207,6 +4222,209 @@ Secondly I just replaced this and used the `mcr.microsoft.com/dotnet/sdk:9.0-alp
 ### Docker Images & Tags
 
 Docker images and tags can be found here - https://mcr.microsoft.com/en-us/artifact/mar/dotnet/sdk/tags
+
+
+## Aspire
+
+Documentation - https://learn.microsoft.com/en-us/dotnet/aspire/get-started/aspire-overview
+
+Samples - https://github.com/dotnet/aspire-samples
+
+What is .NET Aspire?
+
+.NET Aspire is a relatively new initiative from Microsoft that targets cloud-native, distributed applications built on the .NET platform. In short:
+
+- It provides tools, templates, and packages (NuGet, CLI, project templates) for building observable, resilient, production-ready distributed apps. 
+- At its core is an AppHost (or "Application Model") concept where you define your application's services, dependencies, resources and connections in code (C#) rather than in many YAML/JSON files. 
+- It offers a developer-loop experience where you can spin up your whole app (services + dependencies) locally with one command, inspect logs/traces/metrics via a built-in dashboard, then later deploy the same composition to production (containers, Kubernetes, cloud, etc.). 
+- It's opinionated (i.e., it promotes a certain way of structuring apps, defaults for telemetry/health checks/resilience). 
+
+So, for a backend/frontend multi-project system like yours, .NET Aspire is aimed at making the local dev + orchestration + observability smoother, and the "from dev to deploy" pipeline more consistent.
+
+Here are the pain points it addresses:
+
+- Complexity of local development for distributed systems
+When you have multiple services (APIs, frontend apps, databases, message queues, caches...), spinning them all locally (via Docker Compose, Kubernetes, etc) is often cumbersome, error-prone, and inconsistent across developers/OSs. Aspire gives you a code-first orchestrator to define what you need. E.g. from the docs: "launch and debug your entire app locally with one command" 
+
+- Drift between dev and production
+Often the local dev environment diverges from production (missing telemetry, different health checks, missing wiring of services, etc). Aspire tries to reduce that by having the same composition (AppHost code) drive both dev orchestration and define the blueprint for deployment. 
+
+- Boilerplate for cloud-native concerns
+Things like logging, metrics/tracing (OpenTelemetry), health checks, resilience (retries, circuit breakers), service discovery, developers keep writing the same scaffolding. Aspire provides integrations that include those out of the box (when you "add Redis", "add PostgreSQL", etc).
+
+- Faster onboarding & simpler architecture
+For teams developing microservices or moving from monolith to services (as Microsoft's own internal teams have done), Aspire aims to reduce friction, especially less tooling overhead for dev machines. For example the Microsoft Copilot team used Aspire to onboard new devs quickly.
+
+### Creating A New Aspire Project
+
+To start, we need to make sure we have the Aspire Project Templates installed.
+
+```bash
+dotnet new install Aspire.ProjectTemplates
+```
+
+We can then run something like this:
+
+```bash
+dotnet new aspire-starter --use-redis-cache --output AspireSample
+```
+
+### Adding Aspire To An Existing Application
+
+To start, we need to add a AppHost project.
+
+```bash
+dotnet new aspire-apphost -o AspireTest.AppHost
+```
+
+Then we need to add it to our SLN 
+
+```bash
+dotnet sln ./AspireTest.sln add ./AspireTest.AppHost/AspireTest.AppHost.csproj
+```
+
+We then need to add references to any projects we want to use with Aspire. This could be an API and frontend for example
+
+```bash
+dotnet add ./AspireTest.AppHost/AspireTest.AppHost.csproj reference ./Projects/Api.csproj
+
+dotnet add ./AspireTest.AppHost/AspireTest.AppHost.csproj reference ./Projects/Frontend.csproj
+```
+
+Inside the `AppHost` project, we can then add our Projects in our `Program.cs`
+
+```C#
+var builder = DistributedApplication.CreateBuilder(args);
+
+var api = builder.AddProject<Projects.Api>("api")
+    WithReplicas(3); // This gives 3 instances of the API. More for production use
+
+var frontend = builder.AddProject<Projects.Frontend>("frontend")
+    .WithReference(api)
+    .WaitFor(api)
+    .WithExternalHttpEndpoints();
+
+builder
+    .Build()
+    .Run();
+```
+
+To test this, we can now set the `AppHost` as the startup project and run it.
+
+Next we need to add the ServiceDefaults project. In Rider this does the extension methods etc on the add project functionality.
+
+```bash
+dotnet new classlib -o ServiceDefaults
+dotnet sln add ./ServiceDefaults/ServiceDefaults.csproj
+
+dotnet add ./ServiceDefaults/ServiceDefaults.csproj package Aspire.Hosting
+dotnet add ./ServiceDefaults/ServiceDefaults.csproj package Aspire.OpenTelemetry
+dotnet add ./ServiceDefaults/ServiceDefaults.csproj package Microsoft.Extensions.Http.Resilience
+```
+
+Create a file `Extensions/ServiceDefaults.cs`:
+
+```C#
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+public static class ServiceDefaults
+{
+    public static IHostApplicationBuilder AddServiceDefaults(this IHostApplicationBuilder builder)
+    {
+        // Add OpenTelemetry (logs, traces, metrics)
+        builder.AddOpenTelemetry()
+               .WithMetrics()
+               .WithTracing()
+               .WithLogging();
+
+        // Add default service health checks
+        builder.Services.AddHealthChecks();
+
+        // Add default resilience handlers for HTTP
+        builder.Services.AddHttpClient()
+            .AddStandardResilienceHandler();
+
+        return builder;
+    }
+}
+```
+
+In our projects we need to add the ServiceDefaults project as a reference then add the following to our `Program.cs`
+
+```C#
+builder.AddServiceDefaults();
+
+app.MapDefaultEndpoints();
+```
+
+### Adding Integrations
+
+In .NET Aspire, an integration is a pre-built package (usually a NuGet package) that provides opinionated defaults, automatic wiring and resource modelling.
+
+Let's add a database.
+
+In the `AppHost` project, we need to add a `Hosting` package which normally start with `Aspire.Hosting`. Lets add `Aspire.Hosting.SqlServer`.
+
+```bash
+dotnet add package Aspire.Hosting.SqlServer
+```
+
+In our `Program.cs` in the AppHost project, lets now add it in.
+
+```C#
+// Add parameters
+var password = builder.AddParameter("password", secret: true);
+
+// Add the database
+var db = builder
+    .AddSqlServer("sql", password, 1433)
+    .AddDatabase("db")
+    .WithLifetime(ContainerLifetime.Persistent);
+
+var api = builder.AddProject<Projects.Api>()
+   .WithReference(db)
+   .WaitFor(db);
+```
+
+To set our Parameters mentioned above we can add them to our `AppSettings` under a Parameters key.
+
+```json
+{
+    "Parameters": {
+        "password": "SuperSecret123!"
+    }
+}
+```
+
+If we want to use a .env file, we can follow these steps
+
+Install the `DotNetEnv` package to our AppHost project from Nuget and add these to our Program.cs.
+
+```C#
+builder.Configuration.AddEnvironmentVariables();
+builder.Configuration.AddDotNetEnv();
+```
+
+Then we add them using this format
+
+```ini
+Aspire__Parameters__password=SuperSecret123!
+```  
+
+Now we need to add a NuGet package to our project we referenced when setting up our database earlier e.g Api. These still start with aspire but don't have hosting in the name.
+
+Add the following package to the project.
+
+```bash
+dotnet add package Aspire.Microsoft.EntityFrameworkCore.SqlServer
+```
+
+In our projects `Program.cs` we can then add the following making sure the connection name is the same as the database name we gave in the Aspire AppHost project.
+
+```C#
+builder.AddSqlServerDbContext<TestDbContext>(connectionName: "sql");
+```  
 
 ## Architecture
 
@@ -14348,7 +14566,58 @@ coverlet ./bin/Debug/net9.0/Users.Api.Tests.Unit.dll --target "dotnet" --targeta
 
 ## Integration Testing
 
+As modern .NET applications grow in complexity, they rarely operate in isolation. A typical C# application must coordinate multiple components such as databases, external APIs, file systems, message queues, domain services, application layers, and more. Each of these elements may work correctly when tested individually, but real-world reliability depends on how well they work together. This is the purpose of integration testing.
+
+Integration testing is the practice of verifying that the boundaries between components function as expected. Unlike unit tests, which isolate a single class or function, integration tests exercise the real interactions across modules. They ensure not just that a repository returns data, but that it can actually communicate with a real or realistic database; not just that a controller returns a response, but that the entire web pipeline, middleware, filters, DI container, and business logic interact correctly.
+
+In C#, integration testing has become a first-class practice thanks to the evolution of .NET. Features such as the built-in test host (`WebApplicationFactory<T>`), dependency injection, minimal APIs, EF Core's in-memory and test containers support, and standardized configuration frameworks make it easier to spin up realistic environments that mimic production. These tools allow developers to test the entire stack without resorting to brittle manual setups.
+
+Unit tests rely heavily on mocks, which means they test your assumptions about how dependencies behave. Integration tests use real implementations, uncovering issues such as:
+
+- Incorrect connection strings
+- Serialization/deserialization mismatches
+- EF Core query translation errors
+- Middleware ordering problems
+- DI misconfigurations
+- API routing inconsistencies
+
+These are the types of bugs that unit tests are blind to but users experience immediately.
+
+A system can be composed of perfectly functioning modules that nonetheless fail when combined. Integration testing detects:
+
+- Data flowing incorrectly across layers
+- Unexpected edge cases at component boundaries
+- Architectural regressions when refactoring
+- Subtle timing or transaction issues
+
+This is especially important in domain-driven systems where the domain, application, and infrastructure layers must collaborate tightly.
+
+Refactoring often means changing internal structures while keeping external behaviour consistent. Without integration tests, it's easy to unintentionally break a chain of calls or remove logic that another component relied on.
+
+A well-designed integration test suite becomes a safety net: if your refactor breaks the behaviour at a boundary, the tests catch it immediately.
+
+Modern C# applications rely heavily on infrastructure, particularly databases. Integration tests surface issues such as:
+
+- Incorrect migrations
+- Data seeding problems
+- Query performance issues
+- Deadlocks or transaction isolation conflicts
+
+This makes them particularly important for backend services, microservices, and API-centric systems.
+
+### 5 Integration Testing Steps
+
+There are 5 steps we go through when writing integration tests.
+
+- Setup - Setting up databases, running migrations etc
+- Dependency Mocking - Mocking third party API's we don't want to test
+- Execution - Standard testing section like running code
+- Assertion - Checking the data coming back from execution.
+- Clean up - Tearing down data we have made so it doesn't affect further tests
+
 ### Setup Notes
+
+To begin, we need to create a new project. In this instance we will be using XUnit. We can create a new project and call it something like `TestProject.Integration`.
 
 When working with integration tests, we need to make sure the tests project is 
 referencing the API. 
@@ -14391,6 +14660,602 @@ public class OrderEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     }
 }
 ```
+
+### Naming Structure
+
+Within our `TestProject.Integration` project, a good way of naming your tests is setting the filename as the name of the controller or endpoint we are testing e.g. `AuthControllerTests`.
+
+For our methods within the test class, we can follow something like the action, then what is returned and what happens e.g. `Get_ReturnsOk_WhenCheckingUserHealth`.
+
+The idea of naming our tests like this makes it self documenting and easier for other developers to understand what our tests are going to be doing.
+
+### Setup & Teardown
+
+When using XCode we can setup and teardown our functions like this.
+
+```C#
+public class AuthControllerTests : IAsyncLifetime, IDisposable
+{
+    // Setup without async, use a constructor
+    public AuthControllerTests()
+    {
+
+    }
+
+    // Set up with async, we need to implement the IAsyncLifetime interface
+    public async Task InitializeAsync()
+    {
+
+    }
+
+    // Teardown without async, implement the IDisposible interface
+    public void Dispose()
+    {
+
+    }
+
+    // Teardown with async
+    public async Task DisposeAsync()
+    {
+        return Task.CompletedTask;
+    }
+}
+```
+
+### WebApplication Factory
+
+`WebApplicationFactory<TEntryPoint>` is a built-in testing utility provided by ASP.NET Core that allows you to spin up a fully functional, in-memory version of your web application during integration tests. It loads your real Program or Startup class, configures the full dependency injection container, registers middleware, sets up routing, and exposes an HttpClient that behaves exactly like a real client calling your API.
+
+This lets you send actual HTTP requests to your application without running it on a real web server. It behaves almost exactly like production, but isolated within the test process. This makes it ideal for testing:
+
+- Controllers / Minimal APIs
+- Middleware
+- Routing
+- Authentication/Authorization
+- Filters
+- Real services registered in DI
+- End-to-end request handling through the pipeline
+
+Because it boots your real application, it provides a far more realistic environment than mocks or manually constructed controllers.
+
+We will also need to install this package in our testing project.
+
+```bash
+dotnet add package Microsoft.AspNetCore.Mvc.Testing
+```
+
+Example:
+
+In our API we need to make an interface we can use to pass into our web application factory.
+We then create a reference to our API project from our testing project so we can reference our new interface.
+
+```C#
+public interface IApiMarker { }
+```
+
+```C#
+// We use a class fixture here so all our tests use the same instance of our web application factory
+public class ApiTests : IClassFixture<WebApplicationFactory<IApiMarker>>
+{
+    private readonly HttpClient _client;
+
+    public ApiTests(WebApplicationFactory<IApiMarker> factory)
+    {
+        _client = factory.CreateClient();
+    }
+
+    [Fact]
+    public async Task Get_Endpoint_ReturnsSuccess()
+    {
+        var response = await _client.GetAsync("/weatherforecast");
+        response.EnsureSuccessStatusCode();
+    }
+}
+```
+
+Now we may need to customise this quite a bit so a good idea is to create a Factory class and use it this way.
+
+```C#
+public class TestApiFactory : WebApplicationFactory<IApiMarker>
+{
+    // Override functionality here like disabling logs to third party providers etc
+}
+```
+
+We then just use this in our IClassFixture instead.
+
+```C#
+public class ApiTests : IClassFixture<WebApplicationFactory<TestApiFactory>>
+{
+    private readonly HttpClient _client;
+
+    public ApiTests(WebApplicationFactory<TestApiFactory> factory)
+    {
+        _client = factory.CreateClient();
+    }
+
+    [Fact]
+    public async Task Get_Endpoint_ReturnsSuccess()
+    {
+        var response = await _client.GetAsync("/weatherforecast");
+        response.EnsureSuccessStatusCode();
+    }
+}
+```
+
+### Different Testing Scenarios
+
+This is examples of different testing scenarios in integration testing. They are all based in one class to keep it more minimal but each method is commented with what we are testing.
+
+```C#
+using System.Net;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
+
+public class ExampleTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+
+    // Setup
+    public ExampleTests(WebApplicationFactory<Program> factory)
+    {
+        _client = factory.CreateClient();
+    }
+
+    // Status Codes
+    [Fact]
+    public async Task HelloEndpoint_Returns200Ok()
+    {
+        // Act
+        var response = await _client.GetAsync("/hello");
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    // Text Responses
+    [Fact]
+    public async Task GreetingEndpoint_ReturnsExpectedText()
+    {
+        // Act
+        var response = await _client.GetAsync("/greeting");
+
+        // Assert: text body
+        var content = await response.Content.ReadAsStringAsync();
+        Assert.Equal("Hello from the API!", content);
+    }
+
+    // JSON responses
+    private record UserDto(int Id, string Name, string Role);
+
+    [Fact]
+    public async Task UserEndpoint_ReturnsExpectedJson()
+    {
+        // Act
+        var response = await _client.GetAsync("/user");
+
+        // Assert: status code
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // Deserialize JSON into a strongly typed record
+        var user = await response.Content.ReadFromJsonAsync<UserDto>();
+
+        // Assert values
+        Assert.NotNull(user);
+        Assert.Equal(1, user!.Id);
+        Assert.Equal("Joe", user.Name);
+        Assert.Equal("Admin", user.Role);
+    }
+
+    // Json Response failing validation
+    [Fact]
+    public async Task Register_ReturnsValidationProblemDetails_WhenInvalid()
+    {
+        // Arrange: missing Email + short Username
+        var invalidPayload = new
+        {
+            Username = "Al"
+        };
+
+        // Act
+        var response = await _client.PostAsJsonAsync("/register", invalidPayload);
+
+        // Assert status code
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        // Read the validation details using the built-in type
+        var problem = await response.Content.ReadFromJsonAsync<ValidationProblemDetails>();
+
+        Assert.NotNull(problem);
+        Assert.Equal(400, problem!.Status);
+
+        // Verify specific validation errors
+        Assert.True(problem.Errors.ContainsKey("Email"));
+        Assert.True(problem.Errors.ContainsKey("Username"));
+
+        Assert.Contains("required", problem.Errors["Email"][0], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("minimum length", problem.Errors["Username"][0], StringComparison.OrdinalIgnoreCase);
+    }
+}
+```
+
+### Generating Fakeable Data
+
+As the tests get more advanced, there is times we will need to generate data to insert into our database etc before asserting if that record was created successfully. 
+
+A good package for creating this data is `Bogus` which generates data to a field we want to map to.
+
+Url - https://www.nuget.org/packages/Bogus
+
+```bash
+dotnet add package Bogus
+```
+
+Now we can make a FakerDTO for our object which are normally kept in a `Builder/` or `Fixtures/` directory.
+
+```C#
+using Bogus;
+
+public class CreateUserDtoFaker : Faker<CreateUserDto>
+{
+    public CreateUserDtoFaker()
+    {
+        RuleFor(x => x.FirstName, faker => faker.Name.FirstName());
+        RuleFor(x => x.LastName,  faker => faker.Name.LastName());
+        RuleFor(x => x.Email,     faker => faker.Internet.Email());
+    }
+}
+```
+
+We now create a test
+
+```C#
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
+
+public class BogusIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+    private readonly CreateUserDtoFaker _faker;
+
+    public BogusIntegrationTests(WebApplicationFactory<Program> factory)
+    {
+        _client = factory.CreateClient();
+        _faker = new CreateUserDtoFaker();
+    }
+
+    [Fact]
+    public async Task CreateUser_ReturnsOk_WithValidBogusData()
+    {
+        // Arrange: generate fake user data
+        var fakeUser = _faker.Generate();
+
+        // Act
+        var response = await _client.PostAsJsonAsync("/users", fakeUser);
+
+        // Assert: API should return 200 OK
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // Assert: the returned user matches the sent payload
+        var result = await response.Content.ReadFromJsonAsync<CreateUserResponse>();
+
+        Assert.NotNull(result);
+        Assert.Equal(fakeUser.FirstName, result!.User.FirstName);
+        Assert.Equal(fakeUser.LastName,  result.User.LastName);
+        Assert.Equal(fakeUser.Email,     result.User.Email);
+    }
+
+    private class CreateUserResponse
+    {
+        public string Message { get; set; } = "";
+        public CreateUserDto User { get; set; } = default!;
+    }
+}
+```
+
+### Using Docker For Our Test Database
+
+For integration tests we don't need to be using a database which is running all the time. Instead, we can use docker which will allow us to spin up a database when testing then remove it once they are done. This will also reduce how much clean up is needed and prevent stale data from remaining.
+
+To get started, make sure you have docker & docker compose installed.
+
+Next we need to add a package to our test project.
+
+Documentation - https://dotnet.testcontainers.org/
+
+```bash
+dotnet add package Testcontainers
+dotnet add package Testcontainers.PostgreSql
+```
+
+If we made a factory class earlier when setting up our `WebApplicationFactory` we can just configure this within that factory class. The values here for the username and password etc are not too important as it is a temporary database. They can be extracted to a `.env` file or credentials manager you're using so it is all in once place if desired.
+
+```C#
+using Testcontainers.PostgreSql;
+
+public class TestApiFactory : WebApplicationFactory<IApiMarker>, IAsyncLifetime
+{
+    private readonly PostgreSqlTestcontainer _dbContainer;
+
+    public TestApiFactory()
+    {
+        _dbContainer = new PostgreSqlBuilder()
+            .WithDatabase("testDb")
+            .WithUsername("mainUser")
+            .WithPassword("testingDatabase")
+            .WithImage("postgres:latest")
+            .Build();
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.ConfigureTestServices(services =>
+        {
+            // Remove existing connection factory registrations
+            services.RemoveAll(typeof(IDbConnectionFactory));
+
+            // Use the dynamically assigned Testcontainers connection string
+            services.AddSingleton<IDbConnectionFactory>(_ =>
+                new NpgsqlConnectionFactory(_dbContainer.ConnectionString));
+        });
+    }
+
+    public async Task InitializeAsync()
+    {
+        await _dbContainer.StartAsync();
+
+        // Optionally: apply migrations or seed DB here if needed
+    }
+
+    public new async Task DisposeAsync()
+    {
+        await _dbContainer.DisposeAsync();
+    }
+}
+```
+
+### Using Wiremock To Create Fake External API's
+
+Using WireMock to create fake APIs in integration tests is valuable when your application depends on external HTTP services.
+
+Even though integration tests aim to test "real" parts of your system, you still don't want your tests to call real 3rd-party APIs.
+
+Real APIs might:
+
+- Be slow
+- Be rate-limited
+- Require authentication
+- Charge money
+- Have unpredictable data
+- Break your test suite if they're down
+
+Using a tool like Wiremock helps make our tests deterministic, simulate error conditions that are hard to trigger in real APIs and test your API client logic, not external APIs
+
+To begin, we need to install the Wiremock.Net package into our integration test project through Nuget.
+
+Url - https://github.com/wiremock/WireMock.Net
+
+```bash
+dotnet add package WireMock.Net
+```
+
+We can now make a new class for each of our external API's provided by a third party provider.
+
+```C#
+using WireMock.Server;
+
+namespace MyApplication.Tests.Integration;
+
+public class GithubApiServer : IDisposible
+{
+    private WireMockServer _server;
+
+    public void Start()
+    {
+        _server = WireMockServer.Start();
+    }
+
+    public void SetupUser(string username)
+    {
+        _server
+            .Given(
+                Request
+                    .Create()
+                    .WithPath($"/users/{username}")
+                    .UsingGet()
+            )
+            .RespondsWith(
+                Response
+                    .Create()
+                    .WithBody("") // This is where you would paste a copy of the response
+                    .WithHeader("content-type", "application/json")
+                    .WithStatusCode(200)
+            );
+    }
+
+    public void Dispose() 
+    {
+        _server.Stop();
+        _server.Dispose();
+    }
+}
+```
+
+We then just need to make an instance of this in our factory and call the start and stop and any methods we may need.
+
+```C#
+using Testcontainers.PostgreSql;
+
+public class TestApiFactory : WebApplicationFactory<IApiMarker>, IAsyncLifetime
+{
+    private readonly PostgreSqlTestcontainer _dbContainer;
+
+    private readonly GithubApiServer _githubApiServer = new();
+
+    public TestApiFactory()
+    {
+        _dbContainer = new PostgreSqlBuilder()
+            .WithDatabase("testDb")
+            .WithUsername("mainUser")
+            .WithPassword("testingDatabase")
+            .WithImage("postgres:latest")
+            .Build();
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll(typeof(IDbConnectionFactory));
+
+            services.AddSingleton<IDbConnectionFactory>(_ =>
+                new NpgsqlConnectionFactory(_dbContainer.ConnectionString));
+        });
+    }
+
+    public async Task InitializeAsync()
+    {
+        await _dbContainer.StartAsync();
+
+        _githubApiServer.Start();
+        _githubApiServer.SetupUser("SomeUser");
+    }
+
+    public new async Task DisposeAsync()
+    {
+        await _dbContainer.DisposeAsync();
+
+        _githubApiServer.Dispose();
+    }
+}
+```
+
+When sending the response, this is where we would call our third party API and then use it to return some specific data which makes it look like it is coming from an external service but is just calling Wiremock.
+
+### Example Of Testing An Authenticated Endpoint
+
+```C#
+public class IdentityAuthTests : IClassFixture<TestApiFactory>
+{
+    private readonly TestApiFactory _factory;
+    private readonly HttpClient _client;
+
+    public IdentityAuthTests(TestApiFactory factory)
+    {
+        _factory = factory;
+        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+    }
+
+    // This is better placed into an external class so it can be used over multiple tests
+    private async Task<string> CreateUserAndSignInAsync()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<IdentityUser>>();
+        var signInManager = scope.ServiceProvider.GetRequiredService<SignInManager<IdentityUser>>();
+
+        // Create test user
+        var user = new IdentityUser { UserName = "testuser@example.com", Email = "test@example.com" };
+
+        await userManager.CreateAsync(user, "Password123!");
+
+        // Generate login cookie
+        var principal = await signInManager.CreateUserPrincipalAsync(user);
+
+        var auth = scope.ServiceProvider.GetRequiredService<IAuthenticationService>();
+        var httpContext = new DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider
+        };
+
+        await auth.SignInAsync(httpContext, IdentityConstants.ApplicationScheme, principal);
+
+        // Extract cookie header
+        return httpContext.Response.Headers["Set-Cookie"];
+    }
+
+    [Fact]
+    public async Task MeEndpoint_Returns_401_If_Not_Logged_In()
+    {
+        var response = await _client.GetAsync("/me");
+
+        // Identity returns 302 redirect to /Account/Login typically,
+        // but WebApplicationFactory disables redirect → 302 returned
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task MeEndpoint_Returns_UserId_When_Logged_In()
+    {
+        var cookie = await CreateUserAndSignInAsync();
+
+        _client.DefaultRequestHeaders.Add("Cookie", cookie);
+
+        var response = await _client.GetAsync("/me");
+
+        response.EnsureSuccessStatusCode();
+
+        var json = await response.Content.ReadFromJsonAsync<Dictionary<string, string>>();
+
+        Assert.False(string.IsNullOrEmpty(json["UserId"]));
+    }
+}
+```
+
+### Removing Background Services
+
+If we have any background services running in our API, we can remove them by adding this to our Factory class.
+
+```C#
+protected override void ConfigureWebHost(IWebHostBuilder builder)
+{
+    builder.ConfigureTestServices(services =>
+    {
+        // Use this to remove background services
+        services.RemoveAll(typeof(IHostedService));
+
+        services.RemoveAll(typeof(IDbConnectionFactory));
+
+        services.AddSingleton<IDbConnectionFactory>(_ =>
+            new NpgsqlConnectionFactory(_dbContainer.ConnectionString));
+    });
+}
+```
+
+### Testing With Entity Framework
+
+This is just a short example of how to set up the DbContext for Entity Framework Core.
+
+You should never replace your database with an In-Memory database as this means you're not testing against your actual endpoint and makes your tests redundant.
+
+To start, we can remove our DbContext and replace it again passing in our testing credentials.
+
+```C#
+protected override void ConfigureWebHost(IWebHostBuilder builder)
+{
+    builder.ConfigureTestServices(services =>
+    {
+        services.RemoveAll(typeof(IHostedService));
+
+        services.RemoveAll(typeof(IDbConnectionFactory));
+
+        services.AddSingleton<IDbConnectionFactory>(_ =>
+            new NpgsqlConnectionFactory(_dbContainer.ConnectionString));
+
+        // Setting up Entity Framework Core with postgres
+        services.RemoveAll(typeof(DbContext));
+
+        services.AddDbContext<AppDbContext>(optionsBuilder => optionsBuilder.UseNpgsql(_dbContainer.ConnectionString));
+    });
+}
+```
+
+
 ## CI/CD
 
 ### Setting Up GitHub Actions
@@ -14848,4 +15713,6 @@ This setup provides a robust CI/CD pipeline for deploying a .NET application to 
 - PDFPig - https://github.com/UglyToad/PdfPig - PdfPig supports reading text and content from PDF files. It also supports basic PDF file creation.
 
 - Ardalis.SmartEnum - https://github.com/ardalis/SmartEnum
+
+- Bogus - https://github.com/bchavez/Bogus - A fake data generator library used for Integration tests or seeding data in a test database
 
