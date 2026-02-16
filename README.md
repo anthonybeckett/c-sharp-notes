@@ -117,6 +117,18 @@
     - [Domain Events](#domain-events)
     - [Transactional & Eventual Consistency](#transactional--eventual-consistency)
     - [Authentication & Authorization](#authentication--authorization)
+- [Modular Monolith Architecture](#modular-monolith-architecture)
+    - [Setting Up A Modular Monolith Project](#setting-up-a-modular-monolith-project)
+    - [Adding An EditorConfig File](#adding-an-editorconfig-file)
+    - [Modelling Our Domain](#modelling-our-domain)
+    - [Creating Basic Services](#creating-basic-services)
+    - [Adding Entity Framework Core To Our Modules](#adding-entity-framework-core-to-our-modules)
+    - [Adding Endpoints To Our Module](#adding-endpoints-to-our-module)
+    - [Adding A Test Project For Our Module](#adding-a-test-project-for-our-module)
+    - [Adding A Users Module](#adding-a-users-module)
+    - [Creating User Auth Endpoints](#creating-user-auth-endpoints)
+    - [Adding A Shared Kernel](#adding-a-shared-kernel)
+    - [How Modules Communicate](#how-modules-communicate)
 - [API](#api)
     - [Setup Authentication With Identity](#setup-authentication-with-identity)
     - [Setup Authentication With Identity For Older Versions](#setup-authentication-with-identity-for-older-versions)
@@ -6797,6 +6809,1150 @@ builder.Services.AddIdentityApiEndpoints<IdentityUser>()
 app.MapIdentityApi<IdentityUser>();
 ```
 
+## Modular Monolith Architecture
+
+A modular monolith is an architectural style where your application is deployed as a single unit (a monolith) but internally organised into well-defined, independent modules with clear boundaries. In C#, this usually means one executable (for example an ASP.NET Core app), but structured so that each business area is isolated in code, dependencies flow in controlled directions, and modules don't casually reach into each other's internals.
+
+In practice, each module represents a slice of the business such as Orders, Billing, or Users and owns its own domain logic, application services, and data access. Other modules can only interact with it through explicit contracts (interfaces, events, or public APIs), not by directly touching its internal classes or database tables. The whole system still runs in one process and is deployed together, which keeps things simple, fast, and easy to debug compared to a distributed microservices setup.
+
+In C#, a modular monolith often aligns naturally with Clean Architecture or DDD concepts. You might model each module as its own project or namespace with layers like Domain, Application, and Infrastructure, and enforce boundaries using internal visibility, interfaces, and dependency injection. The key idea is that although everything lives in one deployment, the codebase behaves as if it were made of multiple small, well-contained applications.
+
+The main benefit is that you get many of the advantages people seek from microservices clear ownership, testability, and the ability to evolve parts of the system independently without the operational overhead of distributed systems. And if you later decide to extract a module into a microservice, the work is much easier because the boundaries already exist.
+
+An example of a modular monolithic project would look something like this
+
+```
+MyApp.sln
+│
+├── src
+│   ├── MyApp.Api
+│   │   ├── Controllers
+│   │   │   ├── OrdersController.cs
+│   │   │   └── CustomersController.cs
+│   │   ├── Program.cs
+│   │   └── appsettings.json
+│   │
+│   ├── MyApp.Modules.Orders
+│   │   ├── Domain
+│   │   │   ├── Order.cs
+│   │   │   ├── OrderItem.cs
+│   │   │   └── IOrderRepository.cs
+│   │   │
+│   │   ├── Application
+│   │   │   ├── CreateOrder
+│   │   │   │   ├── CreateOrderCommand.cs
+│   │   │   │   └── CreateOrderHandler.cs
+│   │   │   └── GetOrder
+│   │   │       ├── GetOrderQuery.cs
+│   │   │       └── GetOrderHandler.cs
+│   │   │
+│   │   ├── Infrastructure
+│   │   │   ├── OrderDbContext.cs
+│   │   │   └── OrderRepository.cs
+│   │   │
+│   │   └── OrdersModule.cs
+│   │
+│   ├── MyApp.Modules.Customers
+│   │   ├── Domain
+│   │   │   ├── Customer.cs
+│   │   │   └── ICustomerRepository.cs
+│   │   │
+│   │   ├── Application
+│   │   │   ├── RegisterCustomer
+│   │   │   └── GetCustomer
+│   │   │
+│   │   ├── Infrastructure
+│   │   │   ├── CustomerDbContext.cs
+│   │   │   └── CustomerRepository.cs
+│   │   │
+│   │   └── CustomersModule.cs
+│   │
+│   └── MyApp.SharedKernel
+│       ├── Domain
+│       │   ├── Entity.cs
+│       │   └── ValueObject.cs
+│       └── Abstractions
+│           └── IDomainEvent.cs
+│
+└── tests
+    ├── MyApp.Modules.Orders.Tests
+    └── MyApp.Modules.Customers.Tests
+
+```
+
+### Setting Up A Modular Monolith Project
+
+Let's start with making a project. Navigate to a workspace directory and create a new directory.
+
+```bash
+# Create the workspace directory
+mkdir ModularMusic
+
+# Change into the directory
+cd ModularMusic
+
+# Create a src directory to place all our code into
+mkdir src
+
+# Change into the new directory
+cd src
+
+# Create a new SLN for our project
+dotnet new sln -n ModularMusic
+
+# Create a web API
+dotnet new webapi -n ModularMusic.Web
+
+# Add this new project to our SLN file
+dotnet sln ModularMusic.sln add ./ModularMusic.Web/ModularMusic.Web.csproj
+
+# Create a new class library for our music
+dotnet new classlib -n ModularMusic.Music -o ModularMusic.Music
+
+# Add this new library to our SLN file
+dotnet sln ModularMusic.sln add ./ModularMusic.Music/ModularMusic.Music.csproj
+
+# Add a reference from the API project to our Music library
+dotnet add ModularMusic.Web/ModularMusic.Web.csproj reference ModularMusic.Music/ModularMusic.Music.csproj
+```
+
+This next bit is optional but we can use a library like `FastEndpoints` to set up our routing a bit faster. To set this up, we need to search for it in the NuGet package manager and add it to both of our projects.
+
+NuGet Link - https://www.nuget.org/packages/FastEndpoints/7.3.0-beta.5
+
+Now we can write some test code to make sure our host and Music mudles can communicate with one another.
+
+Lets create some files in our Music library project.
+`MusicEndpoints.cs`
+```C#
+namespace ModularMusic.Music;
+
+// Example if you're not using fast endpoints
+public static class MusicEndpoints
+{
+    public static void MapMusicEndpoints(this WebApplication app)
+    {
+        app.MapGet("/music", (IMusicService musicService) => musicService.ListMusic());
+    }
+}
+
+// Example with fast endpoints
+public class ListMusicResponse
+{
+    public List<MusicDto> Music { get; set; }
+}
+
+public class ListMusicEndpoint(IMusicService musicService) 
+    : EndpointWithoutRequest<ListMusicResponse>
+{
+    public override void Configure()
+    {
+        Get("/music");
+        AllowAnonymous();
+    }
+
+    public override Task<ListMusicResponse> HandleAsync(CancellationToken cancellationToken = default)
+    {
+        var music = musicService.ListMusic();
+
+        await SendAsync(new ListMusicResponse{
+            Music = music
+        });
+    }
+}
+```
+
+`IMusicService`
+```C#
+namespace ModularMusic.Music;
+
+internal interface IMusicService
+{
+    List<MusicDto> ListMusic();
+}
+```
+
+`MusicDto`
+```C#
+namespace ModularMusic.Music;
+
+public record MusicDto(Guid id, string Artist, string Title);
+```
+
+`MusicService`
+```C#
+namespace ModularMusic.Music;
+
+internal class MusicService : IMusicService
+{
+    public List<MusicDto> ListMusic()
+    {
+        return [
+            new MusicDto(Guid.NewGuid(), "Paul Van Dyk", "Columbia"),
+            new MusicDto(Guid.NewGuid(), "Paul Van Dyk", "Avenue")
+        ];
+    }
+}
+```
+
+`MusicServiceExtensions`
+```C#
+namespace ModularMusic.Music;
+
+public static class MusicServiceExtensions
+{
+    public static IServiceCollection AddMusicService(this IServiceCollection services)
+    {
+        services.AddScoped<IMusicService, MusicService>();
+
+        return services;
+    }
+}
+```
+
+Next we can add the book endpoints to our `Program.cs` in our Web Api project.
+
+```C#
+// If we are using fast endpoints
+builder.Services.AddFastEndpoints();
+
+// Add this before we initialise builder.Build();
+builder.Services.AddMusicServices();
+
+// If we are not using fast endpoints
+// Add this around the area where the routing endpoints are normally set.
+// There is an example weather one normally included in the project when you first create it.
+app.MapMusicEndpoints();
+
+// If we are using fast endpoints add this instead
+app.UseFastEndpoints();
+```
+
+The rest of this will be using fast endpoints so keep this in mind when it comes to setting up routes further on.
+
+### Adding An EditorConfig File
+
+`.editorconfig` is a text file that defines coding conventions (indentation, spacing, naming, analyzer rules) that are applied by IDEs and the compiler. It keeps formatting and style consistent across a team.
+
+```ini
+# Apply to all files
+root = true
+
+[*]
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+insert_final_newline = true
+
+# C# specific rules
+[*.cs]
+dotnet_style_qualification_for_field = false:suggestion
+dotnet_style_predefined_type_for_locals_parameters_members = true:suggestion
+
+# Treat nullable warnings as errors
+dotnet_diagnostic.CS8600.severity = error
+dotnet_diagnostic.CS8602.severity = error
+```
+
+`Directory.Build.props` is a central MSBuild properties file automatically applied to all projects in a directory tree. It controls how projects build, not how code looks.
+
+```xml
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+</Project>
+```
+
+These normally go inside the folder with your solution file.
+
+### Modelling Our Domain
+
+Lets start by creating an Entity for our Music.
+
+```C#
+internal class Music
+{
+    public Guid Id { get; private set; } = Guid.NewGuid();
+
+    public string Artist { get; private set; } = string.Empty;
+
+    public string Title { get; private set; } = string.Empty;
+
+    public int YearReleased { get; private set; }
+
+    internal Music(Guid id, string artist, string title, int yearReleased)
+    {
+        Id = id;
+        Artist = artist;
+        Title = title;
+        YearReleased = yearReleased;
+    }
+}
+```
+
+Next we are going to create an interface for our Repository as we will be using Entity Framework Core.
+
+```C#
+internal interface IMusicRepository : IReadOnlyMusicRepository
+{
+    Task AddAsync(Music music);
+
+    Task DeleteAsync(Music music);
+
+    Task SaveChangesAsync();
+}
+
+internal interface IReadOnlyMusicRepository
+{
+    Task<Music?> GetByIdAsync(Guid id);
+
+    Task<List<Music>> ListAsync();
+}
+```
+
+### Creating Basic Services
+
+Now we can add our services which is basically the Application layer.
+
+Let's start with updating our `IMusicService` and `MusicService`
+
+```C#
+// IMusicService
+internal interface IMusicService
+{
+    Task<List<MusicDto>> ListBooksAsync();
+
+    Task<MusicDto> GetMusicByIdAsync(Guid id);
+
+    Task CreateMusicAsync(MusicDto newMusic);
+
+    Task DeleteMusicAsync(Guid id);
+}
+
+// MusicService
+public class MusicService(IMusicRepository musicRepository)
+{
+    public Task CreateBookAsync(MusicDto newMusic)
+    {
+        var music = new Music(newMusic.id, newMusic.Artist, newMusic.Title, newMusic.yearReleased);
+
+        await musicRepository.AddAsync(music);
+
+        await musicRepository.SaveChangesAsync();
+    }
+
+    public async Task DeleteMusicAsync(Guid id)
+    {
+        var musicToDelete = await musicRepository.GetByIdAsync(id);
+
+        if (musicToDelete is not null) {
+            await musicRepository.DeleteAsync(musicToDelete);
+
+            await musicRepository.SaveChangesAsync();
+        }
+    }
+
+    public async Task<MusicDto> GetMusicByIdAsync(Guid id)
+    {
+        var music = await musicRepository.GetByIdAsync(id);
+
+        return new MusicDto(music.Id, music.Artist, music.Title, music.YearReleased);
+    }
+}
+```
+
+### Adding Entity Framework Core To Our Modules
+
+This is how we can set up Entity Framework Core with our modules.
+
+To begin, we need to install NuGet packages and create a db context.
+
+Lets install the packages with NuGet in our Music class library project.
+
+```C#
+dotnet add package Microsoft.EntityFrameworkCore
+
+dotnet add package Microsoft.EntityFrameworkCore.SqlServer
+```
+
+```C#
+public class MusicDbContext : DbContext
+{
+    internal DbSet<Music> Music { get; set; }
+
+    public MusicDbContext(DbContextOptions options) : base(options)
+    {
+        //
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Allows us to have separate schemas for each module
+        modelBuilder.HasDefaultSchema("Music");
+
+        // This allows us to have separate configurations on each module
+        modelBuilder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+    }
+}
+```
+
+Next, lets make our configuration for Entity Framework Core.
+
+```C#
+namespace ModularMusic.Music;
+
+internal class MusicConfiguration : IEntityTypeConfiguration<Music>
+{
+    public void Configure(EntityTypeBuilder<Music> builder)
+    {
+        builder.Property(p => p.Artist)
+            .HasMaxLength(100)
+            .IsRequired();
+
+        builder.Property(p => p.Title)
+            .HasMaxLength(100)
+            .IsRequired();
+    }
+}
+```
+
+We also now need to add a repository class.
+
+```C#
+internal class EfMusicRepository(MusicDbContext dbContext) : IMusicRepository
+{
+    public Task AddAsync(Music music)
+    {
+        dbContext.Add(music);
+
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteAsync(Music music)
+    {
+        dbContext.Remove(music);
+
+        return Task.CompletedTask;
+    }
+
+    public async Task<Music> GetByIdAsync(Guid id)
+    {
+        return await dbContext.Music.FindAsync(id);
+    }
+
+    public async Task<List<Music>> ListAsync()
+    {
+        return await dbContext.Music.ToListAsync();
+    }
+
+    public async Task SaveChangesAsync()
+    {
+        await dbContext.SaveChangesAsync();
+    }
+}
+```
+
+Now we need to wire up some more services for our DI container.
+
+```C#
+namespace ModularMusic.Music;
+
+public static class BookServiceExtensions
+{
+    public static IServiceCollection AddMusicService(
+        this IServiceCollection services
+        ConfigurationManager config
+    )
+    {
+        string? connectionString = config.GetConnectionString("MusicConnectionString");
+
+        services.AddDbContext<MusicDbContext>(options => options.UseSqlServer(connectionString));
+
+        services.AddScoped<IMusicRepository, EfMusicRepository>();
+        services.AddScoped<IMusicService, MusicService>();
+
+        return services;
+    }
+}
+
+// With the configuration manager above, we now need to pass that in
+// from our Program.cs file in our webapi project
+builder.Services.AddMusicServices(builder.Configuration);
+```
+
+Also depending on how you normally set this up, we need to add our Connection String to connect to the database.
+
+For this example we will just add it to our `AppSettings.json` in our .Web project but you probably want to use a more secure way such as environment variables or local .env files.
+
+```json
+{
+    "ConnectionStrings": {
+        "MusicConnectionString": "Server=(localdb)\\mssqllocaldb;Integrated Security=true;Initial Catalog=ModularMusic;"
+    }
+}
+```
+
+Now we can run our migrations. To run this from the command line, make sure we are in our Web project directory and that `dotnet-ef` is installed globally on the system.
+
+```bash
+# Make sure the dotnet-ef tool is installed
+dotnet tool install --global dotnet-ef
+
+# If it already is installed make sure it is on the latest version
+dotnet tool update --global dotnet-ef
+
+# We also need to make sure we have the Entity Framework Core Design package installed in our Web project
+dotnet add package Microsoft.EntityFrameworkCore.Design
+
+# Create a migration referencing the DbContext in the music project
+# -c The context we want to reference for these migrations
+# -p The csproj directory of the module we want to run the migrations in
+# -s The startup project. Normally your main WebApi project
+# -o Where we want to save the migration files
+dotnet ef migrations add Initial -c MusicDbContext -p ../ModularMusic.Music/ModularMusic.Music.csproj -s ./ModularMusic.Web.csproj -o Data/Migrations
+
+# Next we run our migrations to apply them to the database
+dotnet ef database update
+
+# If you get any errors about globalization-invariants you need to remove this line from the WebApi csproj
+<InvariantGlobalization>true</InvariantGlobalization>
+```
+
+### Adding Endpoints To Our Module
+
+Next we need to add our endpoints so we can call the data within our module.
+
+Lets create our new endpoints. These can all go in one file or be split into multiple files depending on preference. For this example, I am going to place them all in the `ListMusicEndpoint`
+
+```C#
+// Endpoint we already had
+public class ListMusicResponse
+{
+    public List<MusicDto> Music { get; set; }
+}
+
+public class ListMusicEndpoint(IMusicService musicService) 
+    : EndpointWithoutRequest<ListMusicResponse>
+{
+    public override void Configure()
+    {
+        Get("/music");
+        AllowAnonymous();
+    }
+
+    public override async Task<ListMusicResponse> HandleAsync(CancellationToken cancellationToken = default)
+    {
+        var music = musicService.ListMusic();
+
+        await SendAsync(new ListMusicResponse{
+            Music = music
+        });
+    }
+}
+
+// GetById endpoint
+public class GetMusicByIdRequest
+{
+    public Guid Id { get; set; }
+}
+
+internal class GetMusicByIdEndpoint(IMusicService musicService) : Endpoint<GetMusicByIdRequest, MusicDto>
+{
+    public override void Configure()
+    {
+        Get("/music/{Id}");
+        AllowAnonymous();
+    }
+
+    public override async Task<ListMusicResponse> HandleAsync(GetMusicByIdRequest request, CancellationToken cancellationToken = default)
+    {
+        var music = musicService.GetMusicByIdAsync(request.id);
+
+        if (music is null) {
+            await SendNotFoundAsync();
+
+            return;
+        }
+
+        await SendAsync(music);
+    }
+}
+
+// Create music
+public class CreateMusicRequest
+{
+    public Guid? Id { get; set; }
+    public string Artist { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public int? YearReleased { get; set; }
+}
+
+internal class GetMusicByIdEndpoint(IMusicService musicService) : Endpoint<CreateMusicRequest, MusicDto>
+{
+    public override void Configure()
+    {
+        Post("/music");
+        AllowAnonymous();
+    }
+
+    public override async Task<ListMusicResponse> HandleAsync(CreateMusicRequest request, CancellationToken cancellationToken = default)
+    {
+        var newMusicDto = new MusicDto(
+            request.Id ?? Guid.NewGuid(),
+            request.Artist,
+            request.Track,
+            request.YearReleased
+        )
+
+        await musicService.CreateBookAsync(newMusicDto);
+
+        await SendCreatedAtAsync<GetMusicIdEndpoint>(new { newMusicDto.Id }, newMusicDto);
+    }
+}
+
+// Delete Endpoint
+public class DeleteMusicRequest
+{
+    public Guid Id { get; set; }
+}
+
+internal class DeleteMusicEndpoint(IMusicService musicService) : Endpoint<DeleteMusicRequest>
+{
+    public override void Configure()
+    {
+        Delete("/music/{Id}");
+        AllowAnonymous();
+    }
+
+    public override async Task<ListMusicResponse> HandleAsync(CreateMusicRequest request, CancellationToken cancellationToken = default)
+    {
+        await _musicService.DeleteMusicAsync(request.Id);
+
+        await SendNoContentAsync();
+    }
+}
+```
+
+### Adding A Test Project For Our Module
+
+This is just a guide on how to set up a test project for our new Music module.
+
+```bash
+dotnet new xunit -n ModularMusic.Music.Tests
+```
+
+You probably also want to add your favourite testing libraries to this project. One to mention here because we are using it is `FastEndpoints.Testing`.
+
+You may also need to add the Program class as a partial class for your integration tests. This can be done in the WebApi project's `Program.cs` file.
+
+```C#
+public partial class Program {}
+```
+
+We also need to add a reference to the `Web` project.
+
+```bash
+dotnet add tests/ModularMusic.Music.Tests/ModularMusic.Music.Tests.csproj reference src/ModularMusic.Web/ModularMusic.Web.csproj
+```
+
+### Adding A Users Module
+
+Now we are going to add a second module for our users which will handle authentication. For this we can start putting the projects into their own folders if that feels better organised.
+
+First we just need to make a new class library called users similar to when we did the music module.
+
+```bash
+# Create a new class library for our users
+dotnet new classlib -n ModularMusic.Users -o ModularMusic.Users
+
+# Add this new library to our SLN file
+dotnet sln ModularMusic.sln add ./ModularMusic.Users/ModularMusic.Users.csproj
+
+# Add a reference from the API project to our Users library
+dotnet add ModularMusic.Web/ModularMusic.Web.csproj reference ModularMusic.Users/ModularMusic.Users.csproj
+
+# We will also need to add these packages
+dotnet add Microsoft.AspNetCore.Identity.EntityFrameworkCore
+
+```
+
+Now we need to set up our extentions methods again.
+
+```C#
+public class ApplicationUser : IdentityUser
+{
+
+}
+
+public class UsersDbContext : IdentityDbContext
+{
+    public UsersDbContext(DbContextOptions<UsersDbContext> options) : base(options)
+    {
+    }
+
+    public DbSet<ApplicationUser> ApplicationUsers { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder builder)
+    {
+        builder.HasDefaultScheme("Users");
+
+        builder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+
+        base.OnModelCreating(builder);
+    }
+}
+
+public static class UsersModuleExtensions
+{
+    public static IServiceCollection AddUsersModuleServices(this IServiceCollection services, ConfigurationManager config)
+    {
+        string? connectionString = config.GetConnectionString("UsersConnectionString");
+
+        services.AddDbContext<UsersDbContext>(config => config.UseSqlServer(connectionString));
+
+        services.AddIdentityCore<ApplicationUser>()
+            .AddEntityFrameworkStores<UsersDbContext>();
+
+        return services.
+    }
+}
+```
+
+Now we just need to add our user services to our `Program.cs` file in the web project.
+
+```C#
+builder.Services.AddUserModuleServices(builder.Configuration);
+```
+
+Now lets add `Serilog` to our `Web` application.
+
+```bash
+dotnet add package Serilog.AspNetCore
+```
+
+In our `appsettings.json` we now need to configure this to replace our default logging parameters.
+
+```json
+{
+    "Serilog": {
+        "MinimalLevel": {
+            "Default": "Information"
+        },
+        "WriteTo": [
+            {
+                "Name": "Console"
+            }
+        ]
+    }
+}
+```
+
+We now add Serilog to our `Program.cs`
+
+```C#
+using Serilog;
+
+var logger = Log.Logger = new LoggerConfiguration()
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .CreateLogger();
+
+logger.Information("Starting web host");
+
+// User the builder initialization
+builder.Host.UseSerilog((_, config) => config.ReadFrom.Configuration(builder.Configuration));
+```
+
+If we didn't specify this earlier, we need to make sure any `DbContextOptions` are set to the correct dbcontext.
+
+```C#
+public MusicDbContext(DbContextOptions<MusicDbContext> options) : base(options)
+{
+}
+```
+
+### Creating User Auth Endpoints
+
+Lets create our endpoints to register and login a user.
+
+First lets start with our create endpoint. This is a basic example only taking the email and password. In a real application, we want to confirm the password and validate theemail doesn't already exist.
+
+```C#
+public record CreateUserRequest(string Email, string Password);
+
+internal class Create : Endpoint<CreateUserRequest>
+{
+    private readonly UserManager<ApplicationUser> _userManager;
+
+    public Create(UserManager<ApplicationUser> userManager)
+    {
+        _userManager = userManager;
+    }
+
+    public override void Configure()
+    {
+        Post("/users");
+        AllowAnonymous();
+    }
+
+    public override async Task HandleAsync(CreateUserRequest request,
+        CancellationToken cancellationToken)
+    {
+        var newUser = new ApplicationUser { 
+            Email = request.Email,
+            UserName = request.Email
+        };
+
+        await _userManager.CreateAsync(newUser, request.Password);
+
+        await SendOkAsync();
+    }
+}
+```
+
+Before we test this endpoint, we need to create another migration to make sure the tables for Identity are created.
+
+```bash
+# Create the migration files
+dotnet ef migrations add InitialUsers -c UsersDbContext -p "../ModularMusic.Users/ModularMusic.Users.csproj" -s "./ModularMusic.Web.csproj" -o Data/Migrations
+
+# Run the migration
+# We need to specify which context we want to use
+dotnet ef database update -c UsersDbContext
+```
+
+We also need to make an endpoint for logging in the user.
+
+```C#
+public record UserLoginRequest(string Email, string Password);
+
+internal class Login(UserManager<ApplicationUser> userManager) : Endpoint<UserLoginRequest>
+{
+    public override void Configure()
+    {
+        Post("/users/login");
+        AllowAnonymous();
+    }
+
+    public override async Task HandleAsync(UserLoginRequest request, CancellationToken ct)
+    {
+        var user = await userManager.FindByEmailAsync(request.Email!);
+
+        if (user == null)
+        {
+            await SendUnauthorizedAsync();
+            return;
+        }
+
+        var loginSuccessful = await userManager.CheckPasswordAsync(user, request.Password);
+
+        if (!loginSuccessful)
+        {
+            await SendUnauthorizedAsync();
+            return;
+        }
+
+        var jwtSecret = Config["Auth:JwtSecret"]!;
+
+        var token = JWTBearer.CreateToken(jwtSecret, p => p["EmailAddress"] = user.Email!);
+
+        await SendAsync(token);
+    }
+}
+```
+
+We also need to add this to our `appsettings.json`
+
+```json
+{
+    "Auth": {
+        "JwtSecret": "SomethingReallyLongGoesHere"
+    }
+}
+```
+
+We will also need the `FastEndpoints.Security` package adding through NuGet.
+
+```bash
+dotnet add package FastEndpoints.Security
+```
+
+Now we need to add more configuration to our `Program.cs` file in our web project. We also need to add these packages.
+
+```bash
+dotnet add package FastEndpoints.Security
+dotnet add package FastEndpoints.Swagger
+```
+
+```C#
+// Update our AddFastEndpoints to this
+// We can also remove any initial swagger or open api set up
+builder.Services.AddFastEndpoints()
+    .AddJWTBearerAuth(builder.Configuration["Auth:JwtSecret"]!)
+    .AddAuthorization()
+    .SwaggerDocument();
+
+// Add our auth middleware and swagger
+app.UseAuthentication()
+    .UseAuthorization();
+
+app.UseFastEndpoints()
+    .UseSwaggerGen();
+```
+
+### Adding A Shared Kernel
+
+In Domain-Driven Design (DDD), a Shared Kernel is a deliberately shared subset of the domain model that multiple bounded contexts depend on.
+
+In a modular monolith, that usually means:
+
+- Base abstractions
+- Cross-cutting domain primitives
+- Shared value objects
+- Domain event contracts
+- Maybe shared enums
+
+For this, we would create another project which all our other modules can reference but this project does not reference anything itself.
+
+Some examples:
+
+Base Domain Types
+
+```C#
+public abstract class Entity
+{
+    public Guid Id { get; protected set; }
+}
+
+public abstract class ValueObject
+{
+    protected abstract IEnumerable<object> GetEqualityComponents();
+}
+```
+
+Cross-Module Value Objects:
+
+```C#
+public sealed record Money(decimal Amount, string Currency);
+```
+
+Domain Event Abstractions:
+
+```C#
+public interface IDomainEvent
+{
+    DateTime OccurredOn { get; }
+}
+```
+
+### How Modules Communicate
+
+There are a few ways modules can communicate with one another.
+
+#### Direct Calls (Tightly Coupled - Usually Not Recommended)
+
+This involves calling another module's internal services directly via:
+
+- Project references
+- Direct class usage
+- Shared DbContexts
+- Reflection
+
+Problems
+
+- Creates compile-time coupling
+- Encourages leaking domain entities
+- Easy to bypass module boundaries
+- Harder to extract modules later
+- Often leads to circular dependencies
+
+In modular monoliths, this should be avoided unless calling through a clearly defined Application-level interface contract.
+
+```C#
+var result = _musicService.GetTrack(trackId);
+```
+
+#### Mediated Calls (Synchronous, Contract-Based)
+
+This uses a mediator pattern (e.g., MediatR) to send:
+
+Commands
+Queries
+Notifications
+
+Characteristics
+
+- Still synchronous (blocking)
+- Enforces message-based communication
+- Handlers stay inside the owning module
+- Callers depend only on message contracts
+
+Benefits
+
+- Reduces direct coupling
+- Makes module boundaries clearer
+- Easier to refactor to messaging later
+
+Recommended for synchronous cross-module queries.
+
+```C#
+// This would be the call to send the request
+var track = await _mediator.Send(new GetTrackSummaryQuery(trackId));
+
+// On the recieving module, you would have something like this
+internal sealed class GetTrackSummaryHandler
+    : IRequestHandler<GetTrackSummaryQuery, TrackSummaryDto?>
+{
+    private readonly MusicDbContext _db;
+
+    public GetTrackSummaryHandler(MusicDbContext db)
+    {
+        _db = db;
+    }
+
+    public async Task<TrackSummaryDto?> Handle(
+        GetTrackSummaryQuery request,
+        CancellationToken cancellationToken)
+    {
+        return await _db.Tracks
+            .Where(t => t.Id == request.TrackId)
+            .Select(t => new TrackSummaryDto(
+                t.Id,
+                t.Title,
+                t.Price))
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+}
+```
+
+We would also need to set up the above something like this.
+
+```C#
+public static class MusicModule
+{
+    public static IServiceCollection AddMusicModule(
+        this IServiceCollection services)
+    {
+        services.AddDbContext<MusicDbContext>();
+
+        // This is the line we need to add
+        services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(MusicModule).Assembly));
+
+        return services;
+    }
+}
+
+// then add it to our Program.cs file
+builder.Services.AddMusicModule();
+```
+
+#### Shared State (Not Recommended in Modular Monoliths)
+
+This involves:
+
+- Shared database tables
+- Cross-module joins
+- Shared file storage
+- Multiple modules reading/writing the same schema
+
+Why This Is a Problem
+
+- Breaks module ownership
+- Couples modules to the same schema
+- Prevents independent evolution
+- Makes extraction nearly impossible
+
+This is not considered good modular monolith communication.
+It is usually a boundary violation.
+
+#### Domain Events (In-Process Message Bus)
+
+```C#
+// Modules publish events when something happens:
+public sealed record TrackPriceChanged(Guid TrackId, decimal NewPrice);
+
+// Other modules subscribe:
+public class TrackPriceChangedHandler
+{
+    // react here
+}
+```
+
+Characteristics
+
+- Asynchronous (logically)
+- Non-blocking from caller's perspective
+- One-to-many communication
+- Loose coupling
+
+Benefits
+
+- Encourages reactive design
+- Modules don't know who consumes events
+- Very extraction-friendly
+- Strongly recommended for cross-module reactions.
+
+#### Store & Forward (Outbox Pattern)
+
+The Outbox pattern ensures:
+
+- Data is saved in the same transaction as the domain change.
+- Events are stored in an "Outbox" table.
+- A background process publishes them later.
+
+Why This Matters
+
+- Prevents lost messages
+- Guarantees consistency between state and events
+- Essential when using message queues
+
+In a modular monolith, this is often used when preparing for distributed messaging later.
+
+#### Cache & Subscribe (Materialized View Pattern)
+
+A module keeps its own read-only projection of another module's data.
+
+Example:
+
+Cart module maintains a TrackSnapshot.
+
+Updated via domain events from Music.
+
+Characteristics
+
+- Non-blocking
+- Eventually consistent
+- Read-optimized
+- Owned by consuming module
+
+Excellent for high-performance reads
+Maintains boundaries
+Very extraction-friendly
+
+#### What Good Communication Looks Like
+
+Modules communicate through:
+
+- Contracts
+- DTOs
+- Messages
+- Events
+
+They do not communicate through:
+
+- Entities
+- DbContexts
+- Tables
+- Shared schemas
+
 ## API
 
 ### Setup Authentication With Identity
@@ -12614,6 +13770,7 @@ Some libraries to help with styling and themeing etc
 
 Uranium UI - https://uraniumui.gh.enisn-projects.io/en/Getting-Started.html  
 Reactor UI Maui - https://github.com/adospace/reactorui-maui
+Avalonia - https://docs.avaloniaui.net/docs/get-started/
 
 ### Creating A Calendar View
 
@@ -15254,7 +16411,6 @@ protected override void ConfigureWebHost(IWebHostBuilder builder)
     });
 }
 ```
-
 
 ## CI/CD
 
