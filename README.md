@@ -11,6 +11,8 @@
     - [Setting Up DotNetEnv](#setting-up-dotnetenv)
     - [Mapping Custom Endpoints For Razor Pages](#mapping-custom-endpoints-for-razor-pages)
     - [Creating A Library For Shared Code](#creating-a-library-for-shared-code)
+    - [Set Up Editor Config](#set-up-editor-config)
+    - [Set Up Directory Build Props](#set-up-directory-build-props)
 - [Setup Secure Configuration](#setup-secure-configuration)
     - [Initial Config](#initial-config) 
     - [Setting Up Environment Variables Linux](#setting-up-environment-variables-linux)
@@ -91,6 +93,7 @@
     - [Adding Integrations](#adding-integrations)
 - [Architecture](#architecture)
     - [Abstracting Dependency Injection Away From Program.cs](#abstracting-dependency-injection-away-from-programcs)
+    - [Open Source CQRS Libraries](#open-source-cqrs-libraries)
 - [Clean Architecture & DDD](#clean-architecture--ddd)
     - [Introduction](#introduction)
     - [Installing CLI Template](#installing-cli-template)
@@ -129,6 +132,7 @@
     - [Creating User Auth Endpoints](#creating-user-auth-endpoints)
     - [Adding A Shared Kernel](#adding-a-shared-kernel)
     - [How Modules Communicate](#how-modules-communicate)
+    - [Using Mass Transit With Asynchronous Communication](#using-mass-transit-with-asynchronous-communication)
 - [API](#api)
     - [Setup Authentication With Identity](#setup-authentication-with-identity)
     - [Setup Authentication With Identity For Older Versions](#setup-authentication-with-identity-for-older-versions)
@@ -501,6 +505,83 @@ Move code over and update the namespaces.
 
 Right click on the project you want to insert it into and add as a dependency to be able to import it.
 
+### Set Up Editor Config
+
+An `.editorconfig` file defines code style and formatting rules for a project. 
+
+It ensures that everyone on the team uses the same indentation and formatting, their IDE automatically format code consistently and the compiler can enforce certain analyzer rules during build.
+
+It also prevents things like inconsistant naming and different formatting from each developer.
+
+For this to work, we can create a `.editorconfig` in the root of our solution.
+
+```C#
+# Top-most EditorConfig file
+root = true
+
+# Applies to all files
+[*]
+indent_style = tab
+indent_size = 4
+end_of_line = crlf
+insert_final_newline = true
+
+# C# specific rules
+[*.cs]
+
+# Prefer 'var' when type is obvious
+csharp_style_var_when_type_is_apparent = true:suggestion
+
+# Require braces for control blocks
+csharp_prefer_braces = true:warning
+
+# Treat nullable warnings as errors
+dotnet_diagnostic.CS8602.severity = error
+```
+
+### Set Up Directory Build Props
+
+`Directory.Build.props` is an MSBuild file (XML) that automatically applies shared build settings to every project underneath its folder.
+
+It helps you:
+
+- Avoid repeating the same settings in every .csproj
+- Keep build configuration consistent
+- Enforce rules across a whole solution
+
+Like the `.editorconfig` file, this also lives in the root of the solution.
+
+```xml
+<Project>
+  <PropertyGroup>
+    <!-- Target framework for all projects -->
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- Enable modern C# features -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Treat warnings as errors -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Use latest analyzer rules -->
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>All</AnalysisMode>
+    <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+    <!-- Add nuget packages to all projects in the solution -->
+    <ItemGroup>
+        <PackageReference Include="Serilog.AspNetCore" Version="8.0.0" />
+        <PackageReference Include="SonarAnalyzer.CSharp" Version="10.0.0">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+    </ItemGroup>
+</Project>
+```
 
 ## Setup Secure Configuration
 
@@ -4532,6 +4613,19 @@ builder.Services
     .AddRepositories();
 ```
 
+### Open Source CQRS Libraries
+
+The more recent versions of the `MediatR` library have now become a paid only package. This is not ideal for every project. 
+
+A good alternative with very similar functionality is a library called `ConduitR`.
+
+Link - https://github.com/rezabazargan/ConduitR
+
+Another open source more enterprise library is `Orchestrix.Mediator`
+
+Link - https://github.com/anzawi/Orchestrix.Mediator
+
+
 ## Clean Architecture & DDD
 
 ### Introduction
@@ -7952,6 +8046,152 @@ They do not communicate through:
 - DbContexts
 - Tables
 - Shared schemas
+
+
+### Using Mass Transit With Asynchronous Communication
+
+One way we can share data between our modules in a modular monolith project is using `MassTransit`. This is a messaging service which can be used `In Memory` or with a messaging service such as `RabbitMQ`. The communication between modules is done through events and commands and keeps moduels loosly coupled.
+
+To begin, we can install the packages from `NuGet`. This can be done through a global configuration, a common library each module can reference or on each module depending on your preference.
+
+```bash
+dotnet add package MassTransit
+dotnet add package MassTransit.Extensions.DependencyInjection
+dotnet add package MassTransit.RabbitMQ # Not needed if you want to start with in memory transport
+```
+
+For this example, let's use an `Orders` and `Payments` module.
+
+Let's create a DTO we can use in a shared kernal or common library project.
+
+```C#
+public record OrderCreated(
+    Guid OrderId,
+    decimal TotalAmount,
+    DateTime CreatedAt
+);
+```
+
+In our orders module, we can create a service to publish a new event. This can also be done in a `DomainEvent` depending on your overall structure. Notice how the Orders module just publishes to the messaging service with no idea on what is going to consume the event.
+
+```C#
+public class OrderService
+{
+    private readonly IPublishEndpoint _publishEndpoint;
+
+    public OrderService(IPublishEndpoint publishEndpoint)
+    {
+        _publishEndpoint = publishEndpoint;
+    }
+
+    public async Task CreateOrderAsync(decimal total)
+    {
+        var orderId = Guid.NewGuid();
+
+        await _publishEndpoint.Publish(new OrderCreated(
+            orderId,
+            total,
+            DateTime.UtcNow
+        ));
+    }
+}
+```
+
+Next in the `Payments` module in our Application service or Presentation layer (depending on your chosen architecture), we can now add some logic to consume the event just published. We can now save this to the database schema and use it as needed in our Payments module.
+
+```C#
+public class OrderCreatedConsumer : IConsumer<OrderCreated>
+{
+    public async Task Consume(ConsumeContext<OrderCreated> context)
+    {
+        var message = context.Message;
+
+        Console.WriteLine($"Payment processing for order {message.OrderId}");
+
+        // simulate payment logic
+        await Task.Delay(500);
+
+        Console.WriteLine($"Payment completed for {message.OrderId}");
+    }
+}
+```
+
+Another great feature of using a `Messaging Bus` is the ability of more than one Module being able to consume our published events. Let's say we also need to publish to a `Shipping` module, we can add something like this in our Application/Presentation layer.
+
+```C#
+public class ShippingOrderCreatedConsumer : IConsumer<OrderCreated>
+{
+    public Task Consume(ConsumeContext<OrderCreated> context)
+    {
+        Console.WriteLine($"Scheduling shipment for order {context.Message.OrderId}");
+
+        return Task.CompletedTask;
+    }
+}
+```
+
+Last part is we need to register our services.
+
+```C#
+// In our orders module, lets extend the IServiceCollection and register our service class
+public static class OrdersModule
+{
+    public static void AddOrdersModule(this IServiceCollection services)
+    {
+        services.AddScoped<OrderService>();
+    }
+}
+
+// In our Payments module, we need to register Mass Transit and add a consumer
+public static class PaymentsModule
+{
+    public static void AddPaymentsModule(this IServiceCollection services)
+    {
+        services.AddMassTransit(x =>
+        {
+            x.AddConsumer<OrderCreatedConsumer>();
+        });
+    }
+}
+```
+
+In our `Program.cs`, we now just need to add the final parts of the config
+
+```C#
+var builder = WebApplication.CreateBuilder(args);
+
+// Modules
+builder.Services.AddOrdersModule();
+builder.Services.AddPaymentsModule();
+
+// Example using In Memory transport
+builder.Services.AddMassTransit(x =>
+{
+    // Register all consumers from assemblies
+    x.AddConsumers(typeof(Program).Assembly);
+
+    x.UsingInMemory((context, cfg) =>
+    {
+        cfg.ConfigureEndpoints(context);
+    });
+});
+
+// Example using RabbitMQ
+x.UsingRabbitMq((context, cfg) =>
+{
+    cfg.Host("localhost", "/", h =>
+    {
+        h.Username("guest");
+        h.Password("guest");
+    });
+
+    cfg.ConfigureEndpoints(context);
+});
+
+var app = builder.Build();
+app.Run();
+```
+
 
 ## API
 
