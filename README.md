@@ -133,6 +133,9 @@
     - [Adding A Shared Kernel](#adding-a-shared-kernel)
     - [How Modules Communicate](#how-modules-communicate)
     - [Using Mass Transit With Asynchronous Communication](#using-mass-transit-with-asynchronous-communication)
+    - [Architecture Enforcement](#architecture-enforcement)
+    - [Outbox Pattern](#outbox-pattern)
+    - [Inbox Pattern](#inbox-pattern)
 - [API](#api)
     - [Setup Authentication With Identity](#setup-authentication-with-identity)
     - [Setup Authentication With Identity For Older Versions](#setup-authentication-with-identity-for-older-versions)
@@ -8192,6 +8195,483 @@ var app = builder.Build();
 app.Run();
 ```
 
+### Architecture Enforcement
+
+There are a couple of ways we can enforce architecture when using the modular monolith design. 
+
+- Compiler
+- Static Code Analysis
+- Architecture Testing
+- Code Reviews (if working in a bigger team, takes time and possibly error prone)
+
+Lets start with the compiler. In C# the compiler has limited capability to enfore architecture rules. We can mostly do it using `Assemblies` and the `internal` keyword which can provide some good encapsulation, but is very easy to change and break the architecture e.g changing a access modifier from `internal` to `public`.
+
+Next we have static code analysis rules. Some tools we can use to enforce this include
+
+- StyleCop
+- SonarAnalyzer
+- Custom Roslyn Rules
+
+More advanced tools include:
+
+- Sonarcube
+- NDepend
+- NsDepCop - This tool allows us to set up rules of what project can depend on another such as going from an Application layer to a Domain layer.
+
+
+Next, we have architecture testing. These are automated tests that verify the structure and design of your code.
+
+Two of the most common libraries for writing these tests include the following:
+
+- NetArchTest
+- ArchUnitNET
+
+In this example we will use `NetArchTest`.
+
+To get started we can make a `Test` directory in the root of our project. We can then add a new `XUnit` project and give it a name like `ARchitectureTests`.
+
+Next we can install some NuGet packages.
+
+```bash
+# Required
+dotnet add package NetArchTest.Rules
+
+# Optional 
+dotnet add package FluentAssertions
+```
+
+We then need to add a reference to our Api directory so we can access all our modules.
+
+Lets now make an extention method to check that a result should be successful. This can be created inside an `Abstractions` folder.
+
+```C#
+using FluentAssertions;
+using NetArchTest.Rules;
+
+namespace ArchitectureTests.Abstractions;
+
+internal static class TestResultExtensions
+{
+    internal static void ShouldBeSuccessful(this TestResult testResult)
+    {
+        testResult.FailingTypes?.Should().BeEmpty();
+    }
+}
+```
+
+Next, we can create a `BaseTest` all of our tests inherit and store some namespaces for our tests. This can live in the root `ArchitectureTests` directory.
+
+```C#
+public abstract class BaseTest
+{
+    protected const string UsersNamespace = "MixStation.Modules.Users";
+    protected const string UsersIntegrationEventsNamespace = "MixStation.Modules.Users.IntegrationEvents";
+
+    protected const string PlaylistsNamespace = "MixStation.Modules.Playlists";
+    protected const string PlaylistsIntegrationEventsNamespace = "MixStation.Modules.Playlists.IntegrationEvents";
+}
+```
+
+Now we can make a new directory named `Layers` and create a `ModuleTests` inside. We want to write a test to make sure that our module doesn't have a dependency on any other module.
+
+```C#
+public class ModuleTests : BaseTest
+{
+    [Fact]
+    public void UsersModule_SHouldNotHaveDependencyOn_AnyOtherModule()
+    {
+        // Only short for now but you would add each module you have available here
+        string[] otherModules = [PlaylistsNamespace];
+
+        // If we are using integration events then we make another array with the values
+        string[] integrationEventsModules = [
+            PlaylistsIntegrationEventsNamespace
+        ];
+
+        // Next we need a list of assemblies for our module under testing
+        // For instance, if we are using clean architecture, we want our domain, infratsructure and so on
+        List<Assembly> usersAssemblies = [
+            typeof(User).Assembly, // Domain layer
+            Modules.Users.Application.AsseblyReference.Assembly, // Application layer
+            Modules.Users.Presentation.AsseblyReference.Assembly, // Presentation layer
+            typeof(UsersModule).Assembly, // Infrastructure layer
+        ];
+
+        // Now we write our test
+        Types.InAssemblies(usersAssemblies)
+            .Should()
+            .NotHaveDependencyOnAny(otherModules)
+            .GetResult()
+            .ShouldBeSuccessful();
+    }
+}
+```
+
+### Outbox Pattern
+
+The Outbox Pattern is a reliability pattern used in distributed systems to ensure that database changes and message publication occur consistently, even when failures happen. It addresses a common problem that arises when an application needs to both update its own database and publish an event or message to other parts of the system.
+
+An example of this could be we create a new user which saves to the database then sends an event to another module. If an exception is thrown when saving to the database or when publishing the event through our messaging system then we could end up with either lost data or inconsistent data.
+
+With the outbox pattern, instead of publishing the message immediately, the application stores the message in an Outbox table within the same database transaction as the business data.
+
+Because both operations occur within a single transaction:
+
+- If the transaction succeeds, both the order and the message are saved.
+- If the transaction fails, neither is saved.
+
+This guarantees that a successful business operation always has a corresponding message waiting to be published.
+
+A separate background process then reads pending messages from the Outbox table and publishes them to the message broker. Once a message is successfully published, it is marked as processed or removed from the Outbox.
+
+Lets start in our common `Infrastructure` project or similar if you're not using Clean Architecture.
+
+Lets create an Outbox directory.
+
+Now we can create an `OutboxMessage` type and a `OutboxMessageConfiguration`
+
+```C#
+// Outbox message
+public sealed class OutboxMessage
+{
+    public Guid Id { get; init; }
+
+    public string Type { get; init; }
+
+    public string Content { get; init; }
+
+    public DateTime OccurredOnUtc { get; init; }
+
+    public DateTime? ProcessedOnUtc { get; init; }
+
+    public string? Error { get; init; }
+}
+
+// Outbox message configuration to define our table structure in EF Core
+public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<OutboxMessage>
+{
+    public void Configure(EntityTypeBuilder<OutboxMessage> builder)
+    {
+        builder.ToTable("outboxMessages");
+
+        builder.HasKey(o => o.Id);
+
+        builder.Property(o => o.Content).HasMaxLength(2000).HasColumnType("jsonb");
+    }
+}
+```
+
+Next, we need to go to our `DbContext` for the module. Each module is going to have a dedictaed `Outbox` table which will store the `Domain Events` for that particular module which will then be processed completely separate for each module. 
+
+For instance, if we have a Users module, we can register our outbox configuration in our `UsersDbContext` by adding the following
+
+```C#
+public sealed class UsersDbContext(DbCOntextOptions<UsersDbContext> options) : DbContext(options), IUnitOfWork
+{
+    internal DbSet<User> Users { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.HasDefaultSchema("users");
+
+        modelBuilder.ApplyConfiguration(new OutboxMessageConfiguration());
+
+        // Other configs here
+    } 
+}
+```
+
+Then update your migrations and check that a new `outboxMessages` table is being created in the users schema.
+
+This can be repeated across all modules same as above adding the common OutboxMessagingConfiguration to the modules DbContext.
+
+Next, we need to install a package for handling background jobs called `Quartz`
+
+```bash
+dotnet add package Quartz.Extensions.Hosting
+```
+
+If we have an extension method to register modules services, we can register it here or in your `Program.cs`.
+
+```C#
+services.AddQuartz();
+
+services.AddQuartzHostedService(options => options.WaitForJobsToComplete = true);
+```
+
+Next, in our module we can add a `Outbox` directory and add an `OutboxOptions.cs` file to configure how we want our outbox to work.
+
+```C#
+internal sealed class OutboxOptions
+{
+    public int IntervalInSeconds { get; init; }
+
+    public int BatchSize { get; init; }
+}
+```
+
+In the same directory, let's now add a `ProcessOutboxJob.cs` file.
+
+```C#
+[DisallowConcurrentExecution]
+internal sealed class ProcessOutboxJob(
+    IDbConnectionFactory dbConnectionFactory,
+    IServiceScopeFactory serviceScopeFactory,
+    IDateTimeProvider dateTimeProvider,
+    IOptions<OutboxOptions> outboxOptions,
+    ILogger<ProcessOutboxJob> logger) : IJob
+{
+    private const string ModuleName = "Users";
+
+    public async Task Execute(IJobExecutionContext context)
+    {
+        logger.LogInformation("{Module} - Beginning to process outbox messages", ModuleName);
+
+        await using DbConnection connection = await dbConnectionFactory.OpenConnectionAsync();
+        await using DbTransaction transaction = await connection.BeginTransactionAsync();
+
+        IReadOnlyList<OutboxMessageResponse> outboxMessages = await GetOutboxMessagesAsync(connection, transaction);
+
+        foreach (OutboxMessageResponse outboxMessage in outboxMessages)
+        {
+            Exception? exception = null;
+            try
+            {
+                IDomainEvent domainEvent = JsonConvert.DeserializeObject<IDomainEvent>(
+                    outboxMessage.Content,
+                    SerializerSettings.Instance)!;
+
+                using IServiceScope scope = serviceScopeFactory.CreateScope();
+
+                IEnumerable<IDomainEventHandler> domainEventHandlers = DomainEventHandlersFactory.GetHandlers(
+                    domainEvent.GetType(),
+                    scope.ServiceProvider,
+                    Application.AssemblyReference.Assembly);
+
+                foreach (IDomainEventHandler domainEventHandler in domainEventHandlers)
+                {
+                    await domainEventHandler.Handle(domainEvent);
+                }
+            }
+            catch (Exception caughtException)
+            {
+                logger.LogError(
+                    caughtException,
+                    "{Module} - Exception while processing outbox message {MessageId}",
+                    ModuleName,
+                    outboxMessage.Id);
+
+                exception = caughtException;
+            }
+
+            await UpdateOutboxMessageAsync(connection, transaction, outboxMessage, exception);
+        }
+
+        await transaction.CommitAsync();
+
+        logger.LogInformation("{Module} - Completed processing outbox messages", ModuleName);
+    }
+
+    // This example is using Dapper with a Postgres database.
+    private async Task<IReadOnlyList<OutboxMessageResponse>> GetOutboxMessagesAsync(
+        IDbConnection connection,
+        IDbTransaction transaction)
+    {
+        string sql =
+            $"""
+             SELECT
+                id AS {nameof(OutboxMessageResponse.Id)},
+                content AS {nameof(OutboxMessageResponse.Content)}
+             FROM users.outbox_messages
+             WHERE processed_on_utc IS NULL
+             ORDER BY occurred_on_utc
+             LIMIT {outboxOptions.Value.BatchSize}
+             FOR UPDATE
+             """;
+
+        IEnumerable<OutboxMessageResponse> outboxMessages = await connection.QueryAsync<OutboxMessageResponse>(
+            sql,
+            transaction: transaction);
+
+        return outboxMessages.ToList();
+    }
+
+    private async Task UpdateOutboxMessageAsync(
+        IDbConnection connection,
+        IDbTransaction transaction,
+        OutboxMessageResponse outboxMessage,
+        Exception? exception)
+    {
+        const string sql =
+            """
+            UPDATE users.outbox_messages
+            SET processed_on_utc = @ProcessedOnUtc,
+                error = @Error
+            WHERE id = @Id
+            """;
+
+        await connection.ExecuteAsync(
+            sql,
+            new
+            {
+                outboxMessage.Id,
+                ProcessedOnUtc = dateTimeProvider.UtcNow,
+                Error = exception?.ToString()
+            },
+            transaction: transaction);
+    }
+
+    internal sealed record OutboxMessageResponse(Guid Id, string Content);
+}
+```
+
+Above, we use the `DomainEventHandlersFactory`. We can create an instance of this in our common `Infrastructure` project in the `Outbox` directory.
+
+```C#
+public static class DomainEventHandlersFactory
+{
+    private static readonly ConcurrentDictionary<string, Type[]> HandlersDictionary = new();
+
+    public static IEnumerable<IDomainEventHandler> GetHandlers(
+        Type type,
+        IServiceProvider serviceProvider,
+        Assembly assembly)
+    {
+        Type[] domainEventHandlerTypes = HandlersDictionary.GetOrAdd(
+            $"{assembly.GetName().Name}{type.Name}",
+            _ =>
+            {
+                Type[] domainEventHandlerTypes = assembly.GetTypes()
+                    .Where(t => t.IsAssignableTo(typeof(IDomainEventHandler<>).MakeGenericType(type)))
+                    .ToArray();
+
+                return domainEventHandlerTypes;
+            });
+
+        List<IDomainEventHandler> handlers = [];
+        foreach (Type domainEventHandlerType in domainEventHandlerTypes)
+        {
+            object domainEventHandler = serviceProvider.GetRequiredService(domainEventHandlerType);
+
+            handlers.Add((domainEventHandler as IDomainEventHandler)!);
+        }
+
+        return handlers;
+    }
+}
+```
+
+
+Next, lets add a configuration for our Quartz job by creating a file called `ConfigureProcessOutboxJob.cs` in our Outbox folder in our module.
+
+```C#
+internal sealed class ConfigureProcessOutboxJob(IOptions<OutboxOptions> outboxOptions)
+    : IConfigureOptions<QuartzOptions>
+{
+    private readonly OutboxOptions _outboxOptions = outboxOptions.Value;
+
+    public void Configure(QuartzOptions options)
+    {
+        string jobName = typeof(ProcessOutboxJob).FullName!;
+
+        options
+            .AddJob<ProcessOutboxJob>(configure => configure.WithIdentity(jobName))
+            .AddTrigger(configure =>
+                configure
+                    .ForJob(jobName)
+                    .WithSimpleSchedule(schedule =>
+                        schedule.WithIntervalInSeconds(_outboxOptions.IntervalInSeconds).RepeatForever()
+                    )
+            );
+    }
+}                                                
+```
+
+Next, we need to configure out `OutboxOptions`. In this instance because it is not sensitive data we can add some values to our `AppSettings.json` and fetch them in like so.
+
+```C#
+// In our extension method for our module to add services
+services.Configure<OutboxOptions>(configuration.GetSection("Users:Outbox"));
+services.ConfigureOptions<ConfigureProcessOutboxJob>();
+```
+
+In our `AppSettings` (either a global one or a module dependant one depending on your structure).
+
+```json
+{
+    "Users": {
+        "Outbox": {
+            "IntervalInSeconds": 5,
+            "BatchSize": 50
+        }
+    }
+}
+```
+
+Because domain events can fire to more than one module, we will need to implement some Idempotency to make checks that the event has not already been executed on our module if one instance fails and the message has to try again.
+
+One way to keep track of these changes would be to also store them into an `OutboxMessagesConsumed` table which keeps a log of successful events and can be queried before trying to send out an event again to that module.
+
+
+### Inbox Pattern
+
+The Inbox Pattern is often discussed alongside the Outbox Pattern because they solve opposite sides of the same reliability problem. The outbox pattern prevents messages being lost when publishing where the inbox pattern prevents messages being processed multiple times.
+
+The inbox pattern works with every incoming message having a unique identifier. It receives a message, checks the inbox table if this has already been processed then proceeds if there is no result.
+
+Like our outbox pattern, we need to add a new table to store the information in the correct module. Be sure to set your table to have a unique constraint on the messageId column. We will also need to add an Inbox message with the same structure as the outbox message, a configuration for EFCore and everything similar to what we did in the outbox pattern section.
+
+```C#
+modelBuilder.Entity<InboxMessage>()
+    .HasIndex(x => x.MessageId)
+    .IsUnique();
+```
+
+Our consumer would then look something like this
+
+```C#
+public class UserCreatedConsumer : IConsumer<UserCreatedEvent>
+{
+    private readonly AppDbContext _dbContext;
+    private readonly IEmailService _emailService;
+
+    public UserCreatedConsumer(AppDbContext dbContext, IEmailService emailService)
+    {
+        _dbContext = dbContext;
+        _emailService = emailService;
+    }
+
+    public async Task Consume(ConsumeContext<UserCreatedEvent> context)
+    {
+        var messageId = context.MessageId;
+
+        if (messageId is null)
+        {
+            throw new InvalidOperationException("MessageId is required.");
+        }
+
+        try
+        {
+            _dbContext.InboxMessages.Add(
+                new InboxMessage
+                {
+                    MessageId = messageId
+                }
+            );
+
+            await _emailService.SendWelcomeEmail(context.Message.Email);
+
+            await _dbContext.SaveChangesAsync();
+
+            await transaction.CommitAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // Duplicate message
+        }
+    }
+}
+```
 
 ## API
 
