@@ -226,6 +226,15 @@
     - [Cross Platform Services](#cross-platform-services)
     - [Unit Testing In Maui](#unit-testing-in-maui)
 - [Optimising MSSQL Queries](#optimising-mssql-queries)
+    - [Execution Plans](#execution-plans)
+    - [Live Query Statistics](#live-query-statistics)
+    - [Lightweight query profiling](#lightweight-query-profiling)
+    - [Last query plans stats](#last-query-plans-stats)
+    - [Explore Query Store](#explore-query-store)
+    - [Identify problematic query plans](#identify-problematic-query-plans)
+    - [Clustered Indexes](#clustered-indexes)
+    - [Non Clustered Indexes](#non-clustered-indexes)
+    - [Columnstore Indexes](#columnstore-indexes)
 - [Unit Testing](#unit-testing)
     - [Libraries](#libraries)
     - [Test Class Lifecycle](#test-class-lifecycle)
@@ -15618,9 +15627,22 @@ var preferences = Services.Provider.GetRequiredService<IPreferences>();
 
 ## Optimising MSSQL Queries
 
-Start by wrapping the query in a `SHOWPLAN_ALL`
+### Execution Plans
+
+There are two types of execution plans available. These are estimated and actual. The difference is that the actual plan includes runtime statistics that aren't captured in the estimated plan. 
+Typically, you can use the estimated execution plan while writing your query to understand its performance characteristics, identify missing indexes, or detect query anomalies. 
+The actual execution plan is best used to understand the runtime performance of the query and, most importantly, gaps in statistical data that cause the query optimizer to make suboptimal choices based on the data it has available.
+
+When using the graphical output of an execution plan, the flow of execution is from right to left, and top to bottom. The widths of the lines that connect the operators are based on the estimated number of rows of data that flow onward to the next operator. A thick arrow is an indicator of large operator to operator transfer and may be indicative of an opportunity to tune a query.
+
+The tooltip highlights the cost and estimates for the estimated plan, and for an actual plan, it includes comparisons to the actual rows and costs. Each operator also has properties that provide more details than the tooltip. By right-clicking on a specific operator, you can select the Properties option from the context menu to see the full property list.
+
+The Properties pane includes additional information and shows the output list, detailing the columns being passed to the next operator. These columns may indicate that a nonclustered index is needed to improve query performance when analyzed with a clustered index scan. Since a clustered index scan operation reads the entire table, a nonclustered index on the StockItemID column in each table could be more efficient in this scenario.
+
+If you want to see the text based versions, you can run this.
 
 ```SQL
+-- Estimated execution plan
 SET SHOWPLAN_ALL ON;
 GO
 
@@ -15628,6 +15650,16 @@ SELECT * FROM YourTable WHERE Column1 = 'SomeValue';
 GO
 
 SET SHOWPLAN_ALL OFF;
+GO
+
+-- Actual execution plan
+SET STATISTICS PROFILE ON
+GO
+
+SELECT * FROM YourTable WHERE Column1 = 'SomeValue';
+GO
+
+SET STATISTICS PROFILE OFF
 GO
 ```
 
@@ -15650,6 +15682,222 @@ CREATE NONCLUSTERED INDEX IX_YourTable_Column1
 ON YourTable (Column1);
 ```
 
+### Live Query Statistics
+
+This plan viewing option combines the estimated and actual plans into an animated plan that displays execution progress through the operators. It refreshes every second and shows the actual number of rows flowing through the operators. Another benefit of Live Query Statistics is that it shows the handoff from operator to operator, which can be helpful in troubleshooting performance issues. Because this type of plan is animated, it's only available as a graphical plan.
+
+
+### Lightweight query profiling
+
+When you generate actual execution plans, whether using SSMS or the Extended Events monitoring infrastructure, it can introduce significant overhead. Therefore, this process is typically reserved for live site troubleshooting efforts. Observer overhead, as it's known, is the cost of monitoring a running application. In some scenarios, this cost can be just a few percentage points of CPU utilization, but in other cases, like capturing actual execution plans, it can significantly slow down individual query performance. The legacy profiling in SQL Server's engine could produce up to 75% overhead for capturing query information, whereas the lightweight profiling has a maximum overhead of around 2%.
+
+In the first version of lightweight profiling, it collected row count and I/O utilization information (the number of logical and physical reads and writes performed by the database engine to satisfy a given query). Additionally, a new extended event called query_thread_profile was introduced to allow data from each operator in a query plan to be inspected. In the initial version of lightweight profiling, using the feature requires trace flag 7412 to be enabled globally.
+
+If lightweight profiling isn't enabled globally, you can use the USE HINT query hint with QUERY_PLAN_PROFILE to enable lightweight profiling at the query level. When a query with this hint completes execution, a query_plan_profile extended event is generated, providing an actual execution plan. Here's an example of a query with this hint:
+
+```sql
+SELECT [stockItemName]
+ ,[UnitPrice] * [QuantityPerOuter] AS CostPerOuterBox
+ ,[ QuantityonHand]
+FROM [Warehouse].[StockItems] s
+    JOIN [Warehouse].[StockItems] sh ON s.StockItemID = sh.StockItemID
+ORDER BY CostPerOuterBox 
+OPTION(USE HINT ('QUERY_PLAN_PROFILE'));
+```
+
+### Last query plans stats
+
+Lightweight profiling is enabled by default in both SQL Server 2019 and Azure SQL Database and managed instance. Lightweight profiling is also available as a database scoped configuration option, called LIGHTWEIGHT_QUERY_PROFILING. With the database scoped option, you can disable the feature for any of your user databases independent of each other.
+
+Also, there's a dynamic management function called sys.dm_exec_query_plan_stats, which can show you the last known actual query execution plan for a given plan handle. In order to see the last known actual query plan through the function, you can enable trace flag 2451 server-wide. Alternatively, you can enable this functionality using a database scoped configuration option called LAST_QUERY_PLAN_STATS.
+
+You can combine this function with other objects to get the last execution plan for all cached queries:
+
+```sql
+SELECT *
+FROM sys.dm_exec_cached_plans AS cp
+    CROSS APPLY sys.dm_exec_sql_text(plan_handle) AS st
+    CROSS APPLY sys.dm_exec_query_plan_stats(plan_handle) AS qps; 
+GO
+```
+
+This functionality lets you quickly identify the runtime stats for the last execution of any query in your system, with minimal overhead. The following image shows how to retrieve the plan. If you select the execution plan XML, which will be the first column of results, it displays the execution plan shown in the second image below.
+
+### Explore Query Store
+
+The SQL Server Query Store is a per-database feature that automatically captures a history of queries, plans, and runtime statistics, simplifying performance troubleshooting and query tuning. It also provides insights into database usage patterns and resource consumption.
+
+The Query Store consists of three stores:
+
+- Plan store: Stores estimated execution plan information.
+- Runtime stats store: Stores execution statistics information.
+- Wait stats store: Persists wait statistics information.
+
+The Query Store is enabled by default in Azure SQL databases. If you want to use it with SQL Server and Azure Synapse Analytics, you need to enable it first. To enable the Query Store feature, use the following query valid for your environment:
+
+```sql
+-- SQL Server
+ALTER DATABASE <database_name> SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE);
+
+-- Azure Synapse Analytics
+ALTER DATABASE <database_name> SET QUERY_STORE = ON;
+```
+
+Common scenarios
+
+The SQL Server Query Store provides valuable insights into the performance of database operations. Common scenarios include:
+
+- Identifying and fixing performance regressions due to inferior query execution plan selection.
+- Identifying and tuning the highest resource consumption queries.
+- A/B testing to evaluate the impacts of database and application changes.
+- Ensuring performance stability after SQL Server upgrades.
+- Determining the most frequently used queries.
+- Auditing the history of query plans for a query.
+- Identifying and improving unplanned workloads.
+- Understanding the prevalent wait categories of a database and the contributing queries and plans affecting wait times.
+- Analyzing database usage patterns over time in terms of resource consumption (CPU, I/O, Memory).
+
+
+### Identify problematic query plans
+
+#### Hardware constraints:
+
+Hardware constraints typically don't manifest during single query executions but become evident under production load when CPU threads and memory are limited. CPU contention can be detected by observing the performance monitor counter '% Processor Time', which measures server CPU usage. In SQL Server, SOS_SCHEDULER_YIELD and CXPACKET wait types can indicate CPU pressure. Poor storage system performance can slow down even optimized single query executions. Storage performance is best tracked at the operating system level using performance monitor counters Disk Seconds/Read and Disk Seconds/Write, which measure I/O operation completion times. SQL Server logs poor storage performance if an I/O takes longer than 15 seconds. High PAGEIOLATCH_SH waits in SQL Server can indicate storage performance issues. Hardware performance is typically evaluated early in the troubleshooting process due to its ease of assessment.
+
+Most database performance issues stem from suboptimal query patterns, which can put undue pressure on hardware. For example, missing indexes can lead to CPU, storage, and memory pressure by retrieving more data than necessary. It's recommended to address and tune suboptimal queries before tackling hardware issues. Next, we look at query tuning.
+
+#### Suboptimal query constructs:
+
+Relational databases perform best when executing set-based operations, which manipulate data (INSERT, UPDATE, DELETE, and SELECT) in sets, producing either a single value or a result set. The alternative is row-based processing, using cursors or while loops, which increase cost linearly with the number of rows impacted a problematic scale as data volumes grow.
+
+Detecting suboptimal use of row-based operations with cursors or WHILE loops is important, but there are other SQL Server anti-patterns to recognize. Table-valued functions (TVFs), particularly multi-statement TVFs, caused problematic execution plan patterns before SQL Server 2017. Developers often use multi-statement TVFs to execute multiple queries within a single function and aggregate results into a single table. However, using TVFs can lead to performance penalties.
+
+SQL Server has two types of TVFs: inline and multi-statement. Inline TVFs are treated like views, while multi-statement TVFs are treated like tables during query processing. Because TVFs are dynamic and lack statistics, SQL Server uses a fixed row count for estimating query plan cost. This can be fine for small row counts, but inefficient for thousands or millions of rows.
+
+Another anti-pattern is the use of scalar functions, which have similar estimation and execution problems. Microsoft has made significant performance improvements with Intelligent Query Processing, under compatibility levels 140 and 150.
+
+#### SARGability:
+
+The term SARGable in relational databases refers to a predicate (WHERE clause) formatted to use an index to speed up query execution. Predicates in the correct format are called 'Search Arguments' or SARGs. In SQL Server, using a SARG means the optimizer evaluates using a nonclustered index on the column referenced in the SARG for a SEEK operation, instead of scanning the entire index or table to retrieve a value.
+
+The presence of a SARG doesn't guarantee the use of an index for a SEEK. The optimizer’s costing algorithms could still determine that the index is too expensive, especially if a SARG refers to a large percentage of rows in a table. The absence of a SARG means the optimizer won't evaluate a SEEK on a nonclustered index.
+
+Examples of non-SARGable expressions include those with a LIKE clause using a wildcard at the beginning of the string, such as WHERE lastName LIKE '%SMITH%'. Other non-SARGable predicates occur when using functions on a column, like WHERE CONVERT(CHAR(10), CreateDate,121) = '2020-03-22'. These queries are typically identified by examining execution plans for index or table scans where seeks should otherwise occur.
+
+There's an index on the City column that is being used in the WHERE clause of the query and while it's being used in this execution plan above, you can see the index is being scanned, which means the entire index is being read. The LEFT function in the predicate makes this expression non-SARGable. The optimizer won't evaluate using an index seek on the index on the City column.
+
+This query could be written to use a predicate that is SARGable. The optimizer would then evaluate a SEEK on the index on the City column. An index seek operator, in this case, would read a smaller set of rows.
+
+Some other database development anti-patterns are treating the database as a service rather than a data store. Using a database to convert data to JSON, manipulate strings, or perform complex calculations can lead to excessive CPU use and increased latency. Queries that try to retrieve all records and then perform computations in the database can lead to excessive IO and CPU usage. Ideally, you should use the database for data access operations and optimized database constructs like aggregation.
+
+#### Missing indexes:
+
+The most common performance problems for database administrators stem from a lack of useful indexes, causing the engine to read more pages than necessary to return query results. While indexes consume resources (affecting write performance and consuming space), their performance gains often outweigh the extra resource costs. Execution plans with these issues can be identified by the query operator Clustered Index Scan or the combination of Nonclustered Index Seek and Key Lookup, indicating missing columns in an existing index.
+
+The database engine helps by reporting missing indexes in execution plans. The names and details of recommended indexes are available through the dynamic management view sys.dm_db_missing_index_details. Other DMVs like sys.dm_db_index_usage_stats and sys.dm_db_index_operational_stats highlight the utilization of existing indexes.
+
+Dropping an unused index can be sensible. Missing index DMVs and plan warnings should be starting points for tuning queries. It's crucial to understand key queries and build indexes to support them. Creating all missing indexes without evaluating them in context isn't recommended.
+
+#### Missing and out-of-date statistics:
+
+Understanding the importance of column and index statistics to the query optimizer is crucial. It's also essential to recognize conditions that can lead to out-of-date statistics and how this issue can manifest in SQL Server. Azure SQL offerings default to having autoupdate statistics set to ON. Before SQL Server 2016, the default behavior of autoupdate statistics was to not update statistics until the number of modifications to columns in the index equaled about 20% of the number of rows in a table. This behavior could result in significant data modifications that change query performance without updating the statistics, leading to suboptimal plans based on outdated statistics.
+
+Before SQL Server 2016, trace flag 2371 could be used to change the required number of modifications to a dynamic value, so as your table grew, the percentage of row modifications needed to trigger a statistics update decreased. Newer versions of SQL Server, Azure SQL Database, and Azure SQL Managed Instance support this behavior by default. The dynamic management function sys.dm_db_stats_properties shows the last time statistics were updated and the number of modifications since the last update, allowing you to quickly identify statistics that might need manual updates.
+
+#### Poor optimizer choices:
+
+While the query optimizer does a good job of optimizing most queries, there are some edge cases where the cost-based optimizer can make impactful decisions that aren't fully understood. There are many ways to address this including using query hints, trace flags, execution plan forcing, and other adjustments in order to reach a stable and optimal query plan. Microsoft has a support team that can help troubleshoot these scenarios.
+
+In the below example from the AdventureWorks2017 database, a query hint is being use to tell the database optimizer to always use a city name of Seattle. This hint won't guarantee the best execution plan for all city values, but it's predictable. The value of ‘Seattle’ for @city_name will only be used during optimization. During execution, the actual supplied value (‘Ascheim’) is used.
+
+```sql
+DECLARE @city_name nvarchar(30) = 'Ascheim',
+        @postal_code nvarchar(15) = 86171;
+
+SELECT * 
+FROM Person.Address
+WHERE City = @city_name 
+      AND PostalCode = @postal_code
+OPTION (OPTIMIZE FOR (@city_name = 'Seattle');
+```
+
+As seen in the example, the query uses a hint (the OPTION clause) to tell the optimizer to use a specific variable value to build its execution plan.
+
+#### Parameter sniffing:
+
+SQL Server caches query execution plans for future use. Since the execution plan retrieval process is based on the hash value of a query, the query text has to be identical for every execution of the query for the cached plan to be used. In order to support multiple values in the same query, many developers use parameters, passed in through stored procedures, as seen in the following example:
+
+```sql
+CREATE PROC GetAccountID (@Param INT)
+AS
+
+<other statements in procedure>
+
+SELECT accountid FROM CustomerSales WHERE sales > @Param;
+
+<other statements in procedure>
+
+RETURN;
+
+-- Call the procedure:
+
+EXEC GetAccountID 42;
+```
+
+Queries can also be explicitly parameterized using the procedure sp_executesql. However, explicit parameterization of individual queries is done through the application with some form (depending on the API) of PREPARE and EXECUTE. When the database engine executes that query for the first time, it optimizes the query based on the initial value of the parameter, in this case, 42. This behavior, called parameter sniffing, allows for the overall workload of compiling queries to be reduced on the server. However, if there's data skew, query performance could vary widely.
+
+For example, a table that had 10 million records, and 99% of those records have an ID of 1, and the other 1% are unique numbers, performance is based on which ID was initially used to optimize the query. This wildly fluctuating performance is indicative of data skew and isn't an inherent problem with parameter sniffing. This behavior is a fairly common performance problem that you should be aware of. You should understand the options for alleviating the issue. There a few ways to address this problem, but they each come with tradeoffs:
+
+- Use the RECOMPILE hint in your query, or the WITH RECOMPILE execution option in your stored procedures. This hint causes the query or procedure to be recompiled every time it's executed, which will increase CPU utilization on the server but will always use the current parameter value.
+- You can use the OPTIMIZE FOR UNKNOWN query hint. This hint causes the optimizer to choose to not sniff parameters and compare the value with column data histogram. This option won't get you the best possible plan but will allow for a consistent execution plan.
+- Rewrite your procedure or queries by adding logic around parameter values to only RECOMPILE for known troublesome parameters. In the example below, if the SalesPersonID parameter is NULL, the query is executed with the OPTION (RECOMPILE).
+
+```sql
+CREATE OR ALTER PROCEDURE GetSalesInfo (@SalesPersonID INT = NULL)
+AS
+DECLARE  @Recompile BIT = 0
+         , @SQLString NVARCHAR(500)
+
+SELECT @SQLString = N'SELECT SalesOrderId, OrderDate FROM Sales.SalesOrderHeader WHERE SalesPersonID = @SalesPersonID'
+
+IF @SalesPersonID IS NULL
+BEGIN
+     SET @Recompile = 1
+END
+
+IF @Recompile = 1
+BEGIN
+    SET @SQLString = @SQLString + N' OPTION(RECOMPILE)'
+END
+
+EXEC sp_executesql @SQLString
+    ,N'@SalesPersonID INT'
+    ,@SalesPersonID = @SalesPersonID
+GO
+```
+This example is a good solution but it does require a fairly large development effort, and a firm understanding of your data distribution. It requires maintenance as the data changes.
+
+### Clustered Indexes
+
+A common DBA job interview question is to ask the candidate the difference between a clustered and nonclustered index, as indexes are fundamental data storage technologies in SQL Server. A clustered index is the underlying table, stored in sorted order based on the key value. There can only be one clustered index on a given table because the rows can be stored in only one order. A table without a clustered index is called a heap, and heaps are typically used only as staging tables. An important performance design principle is to keep your clustered index key as narrow as possible. When considering one or more key columns for your clustered index, you should choose columns that are unique or contain many distinct values. Another property of a good clustered index key is for records that are accessed sequentially and are used frequently to sort the data retrieved from the table. Having the clustered index on the column used for sorting can prevent the cost of sorting every time that query executes because the data will already be stored in the desired order.
+
+### Non Clustered Indexes
+
+Nonclustered indexes are separate structures from the data rows. A nonclustered index contains the key values defined for the index and a pointer to the data row that contains the key value. You can add extra nonkey columns to the leaf level of the nonclustered index using the included columns feature in SQL Server, allowing you to cover more columns. You can create multiple nonclustered indexes on a table.
+
+### Columnstore Indexes
+
+Columnstore indexes offer enhanced performance for queries involving large aggregation workloads. Initially targeted at data warehouses, columnstore indexes have since been adopted for various other workloads to address query performance issues on large tables. Like b-tree indexes, a clustered columnstore index represents the table itself stored in a special way, while nonclustered columnstore indexes are stored independently of the table. Clustered columnstore indexes inherently include all columns in a table but aren't sorted.
+
+Nonclustered columnstore indexes are typically used in two scenarios. The first is when a column's data type isn't supported in a columnstore index (for example, XML, CLR, sql_variant, ntext, text, and image). Since a clustered columnstore index always contains all columns of the table, a nonclustered index is the only option. The second scenario involves filtered indexes, used in hybrid transactional analytic processing (HTAP) architectures, where data is loaded into the table while reports are simultaneously run. Filtering the index (typically on a date field) allows for efficient insert and reporting performance.
+
+Columnstore indexes store each column independently, offering two benefits: reduced IO by scanning only necessary columns and greater compression due to similar data within columns. They perform best on analytic queries scanning large data sets, such as fact tables in data warehouses. You can augment a columnstore index with a b-tree nonclustered index for singleton value lookups.
+
+These indexes also benefit from batch execution mode, processing sets of rows (typically around 900) at a time instead of one by one. This approach reduces CPU instructions significantly.
+
+Batch mode can provide performance increase over traditional row processing. While batch mode for rowstore doesn't have the same level of read performance as a columnstore index, analytical queries may see up to a 5x performance improvement.
+
+Another advantage of columnstore indexes for data warehouse workloads is the optimized load path for bulk insert operations of 102,400 rows or more. While 102,400 is the minimum value to load directly into the columnstore, each collection of rows, called a rowgroup, can be up to approximately 1,024,000 rows. Having fewer, but fuller, rowgroups makes your SELECT queries more efficient because fewer rowgroups need to be scanned to retrieve the requested records. These loads occur in memory and are directly loaded into the index. For smaller volumes, data is written to a b-tree structure called a delta store and asynchronously loaded into the index.
 
 ## Unit Testing
 
