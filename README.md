@@ -18,6 +18,7 @@
     - [Setting Up Environment Variables Linux](#setting-up-environment-variables-linux)
     - [Accessing Environment Variables](#accessing-environment-variables)
     - [Azure Key Vault On Ubuntu](#azure-key-vault-on-ubuntu)
+    - [Hashicorp](#hashicorp)
 - [C# Topics](#c-topics)
     - [Extension Methods](#extension-methods)
     - [IHttpContextAccessor](#ihttpcontextaccessor)
@@ -235,6 +236,7 @@
     - [Clustered Indexes](#clustered-indexes)
     - [Non Clustered Indexes](#non-clustered-indexes)
     - [Columnstore Indexes](#columnstore-indexes)
+    - [Wait Statistics](#wait-statistics)
 - [Unit Testing](#unit-testing)
     - [Libraries](#libraries)
     - [Test Class Lifecycle](#test-class-lifecycle)
@@ -270,6 +272,13 @@
 - [Publishing A Project](#publishing-a-project)
     - [Deploying To Linux](#deploying-to-linux)
     - [Setting Up A Jenkins Pipeline](#setting-up-a-jenkins-pipeline) 
+- [SQL Server & SQL Projects](#sql-server--sql-projects)
+    - [Setting Up The Project](#setting-up-the-project)
+    - [Setting Up Source Control](#setting-up-source-control)
+    - [Branching & Pull Requests](#branching--pull-requests)
+    - [Handling Schema Drift](#handling-schema-drift)
+    - [Implementing Into CI/CD Pipelines](#implementing-into-cicd-pipelines)
+    - [Unit Tests In SQL Projects](#unit-tests-in-sql-projects)
 - [Cool Nuget Packages](#cool-nuget-packages)
 
 ## Documentation & Learning Resources
@@ -710,6 +719,85 @@ On your Ubuntu machine, set the Key Vault URL:
 ```bash
 export AZURE_KEYVAULT_URL="https://your-keyvault-name.vault.azure.net/"
 ```
+
+### Hashicorp
+
+Hashicorp is a service similar to Azure Key Vault which can be hosted locally and gives similar functionality.
+
+Lets set it up using docker compose.
+
+Add this to our `docker-compose.yml`
+
+```yml
+services:
+  vault:
+    image: hashicorp/vault:latest
+    container_name: local-vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-root-token
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    command: vault server -dev
+```
+
+Start it up and go to `http://localhost:8200`.
+
+Install the vault application for your OS from here: `https://developer.hashicorp.com/vault/install`
+
+Export the vault address to your env vars and login using the `dev-root-token` we created earlier.
+
+```bash
+export VAULT_ADDR='http://localhost:8200'
+
+vault login dev-root-token
+```
+
+We can set and get secrets like this. Note the double underscores help layer it in a hierarchical configuration.
+
+```bash
+vault kv put secret/my-api ConnectionStrings__DefaultConnection="Server=localhost;Database=MyDb;User Id=sa;Password=SuperSecret123"
+
+vault kv get secret/my-api
+```
+
+Next we need to set it up within our Dotnet project.
+
+Lets add a nuget package.
+
+```bash
+dotnet add package VaultSharp
+```
+
+Now we can make a configuration service
+
+```C#
+public class DatabaseConfigurationService
+{
+    private readonly IConfiguration _configuration;
+
+    public DatabaseConfigurationService(IConfiguration configuration)
+    {
+        _configuration = configuration;
+    }
+
+    public string GetConnectionString()
+    {
+        return _configuration["ConnectionStrings:DefaultConnection"]
+            ?? throw new InvalidOperationException(
+                "Database connection string is not configured.");
+    }
+}
+```
+
+We can then register this for dependency injection (either Program.cs or an extension method with them all grouped together depending on your compexity and architecture)
+
+```C#
+builder.Services.AddScoped<DatabaseConfigurationService>();
+```
+
 
 ## C# Topics
 
@@ -15899,6 +15987,46 @@ Batch mode can provide performance increase over traditional row processing. Whi
 
 Another advantage of columnstore indexes for data warehouse workloads is the optimized load path for bulk insert operations of 102,400 rows or more. While 102,400 is the minimum value to load directly into the columnstore, each collection of rows, called a rowgroup, can be up to approximately 1,024,000 rows. Having fewer, but fuller, rowgroups makes your SELECT queries more efficient because fewer rowgroups need to be scanned to retrieve the requested records. These loads occur in memory and are directly loaded into the index. For smaller volumes, data is written to a b-tree structure called a delta store and asynchronously loaded into the index.
 
+### Wait Statistics
+
+A comprehensive approach to monitoring server performance involves evaluating what the server is waiting on. Wait statistics are intricate, and SQL Server is equipped with hundreds of wait types that monitor each running thread and log what the thread is waiting for.
+
+To effectively detect and troubleshoot SQL Server performance issues, it's essential to understand how wait statistics work and how the database engine utilizes them while processing requests. This knowledge allows you to pinpoint bottlenecks and optimize performance more accurately.
+
+Wait statistics are broken down into three types of waits: resource waits, queue waits, and external waits.
+
+- Resource waits occur when a worker thread in SQL Server requests access to a resource that is currently being used by a thread. Examples of resources wait are locks, latches, and disk I/O waits.
+- Queue waits occur when a worker thread is idle and waiting for work to be assigned. Example queue waits are deadlock monitoring and deleted record cleanup.
+- External waits occur when SQL Server is waiting on an external process like a linked server query to complete. An example of an external wait is a network wait related to returning a large result set to a client application.
+
+You can check `sys.dm_os_wait_stats` system view to explore all the waits encountered by threads that executed, and `sys.dm_db_wait_stats` for Azure SQL Database. The `sys.dm_exec_session_wait_stat`s system view lists active waiting sessions.
+
+These system views allow you to get an overview of the performance of the server, and to readily identify configuration or hardware issues. This data is persisted from the time of instance startup, but the data can be cleared as needed to identify changes.
+
+Wait statistics are evaluated as a percentage of the total waits on the server.
+
+In this case, the server has Always On Availability Groups in place, as indicated by the REDO_THREAD_PENDING_WORK and PARALLEL_REDO_TRAN_TURN wait types. The relatively high percentage of CXPACKET and SOS_SCHEDULER_YIELD waits indicates that this server is under some CPU pressure.
+
+As DMVs provide a list of wait types with the highest time accumulated since the last SQL Server startup, collecting and storing wait statistic data periodically could help you understand and correlate performance problems with other database events.
+
+Considering that DMVs provide you with a list of wait types with the highest time accumulated since the last SQL Server startup, collecting and storing wait statistics periodically might help you understand and correlate performance problems with other database events.
+
+There are several types of waits available in SQL Server, but some of them are common.
+
+- RESOURCE_SEMAPHORE: indicates that queries are waiting for memory to become available, often due to excessive memory grants to certain queries. This issue typically manifests as long query runtimes or even time-outs. Causes of these wait types can include out-of-date statistics, missing indexes, and high query concurrency.
+
+- LCK_M_X: frequently indicates a blocking problem. This issue can be resolved by changing to the READ COMMITTED SNAPSHOT isolation level, optimizing indexing to reduce transaction times, or improving transaction management within T-SQL code.
+
+- PAGEIOLATCH_SH: this wait type can indicate issues with indexes or the absence of useful indexes, causing SQL Server to scan excessive amounts of data. Alternatively, if the wait count is low but the wait time is high, it may suggest storage performance problems. You can observe this behavior by analyzing the data in the waiting_tasks_count and wait_time_ms columns in the sys.dm_os_wait_stats system view to calculate the average wait time for a given wait type.
+
+- SOS_SCHEDULER_YIELD: this wait type can indicate high CPU utilization, which is correlated with either high number of large scans, or missing indexes, and often with high numbers of CXPACKET waits.
+
+- CXPACKET: A high occurrence of this wait type can indicate improper configuration. Before SQL Server 2019, the default setting for the max degree of parallelism (MAXDOP) was to use all available CPUs for queries. Additionally, the cost threshold for parallelism was set to 5, which could cause small queries to be executed in parallel, limiting throughput. To reduce this wait type, you can lower the MAXDOP setting and increase the cost threshold for parallelism. However, the CXPACKET wait type can also indicate high CPU utilization, which is typically resolved through index tuning.
+
+- PAGEIOLATCH_UP: This wait type on data pages 2:1:1 can indicate TempDB contention on Page Free Space (PFS) data pages. Each data file has one PFS page per 64 MB of data. This wait is typically caused by only having one TempDB file, as prior to SQL Server 2016, the default behavior was to use one data file for TempDB. The best practice for TempDB is to use one file per CPU core, up to eight files. It's also important to ensure your TempDB data files are the same size and have the same autogrowth settings to ensure they're used evenly. SQL Server 2016 and higher control the growth of TempDB data files to ensure they grow in a consistent, simultaneous fashion.
+
+In addition to the DMVs mentioned earlier, the Query Store also tracks waits associated with specific queries. Although the waits data tracked by the Query Store isn't as granular as the data in the DMVs, it still provides a useful overview of what a query is waiting on.
+
 ## Unit Testing
 
 To setup, right click the solution and Add -> New Project
@@ -17827,6 +17955,291 @@ Notes:
 - Security: Use environment variables or Jenkins credentials to store sensitive data like server details or SSH keys.
 
 This setup provides a robust CI/CD pipeline for deploying a .NET application to a Linux server using Jenkins.
+
+## SQL Server & SQL Projects
+
+### Setting Up The Project
+
+SQL database projects come in two formats. The original format is built on MSBuild (.NET Framework) and ships with SQL Server Data Tools (SSDT) in Visual Studio. The SDK-style format is built on the `Microsoft.Build.Sql` project SDK and is the format used by the SQL Database Projects extension for Visual Studio Code.
+
+For new projects, go with SDK-style.
+
+- .NET 8+ support, so you can build cross-platform on Windows, Linux, and macOS. This support matters when your CI runners aren't Windows machines.
+- NuGet package references for database references, so dependency management follows the same patterns as the rest of the .NET ecosystem.
+- Default globbing for .sql files. Drop a file in the project folder and it automatically is included in the build. No manual file entries needed.
+
+If you have an existing original project, you can convert it to SDK-style by modifying the .sqlproj file. Before you convert the project, back up the project file and archive a .dacpac from the current project. Compare a "before" and "after" .dacpac to confirm the conversion preserved everything.
+
+To create a new SDK-style project:
+
+```bash
+dotnet new sqlproj -n MyDatabaseProject
+```
+
+To define a table, create `Tables/Customers.sql` or if you work with different schemas then something like `Customer/Tables/Customers.sql`.
+
+```SQL
+CREATE TABLE [dbo].[Customers]
+(
+    [CustomerID] INT NOT NULL PRIMARY KEY,
+    [FirstName] NVARCHAR(50) NOT NULL,
+    [LastName] NVARCHAR(50) NOT NULL,
+    [Email] NVARCHAR(100) NULL
+);
+```
+
+To build the project and generate a dacpac in `bin/Debug` run the following:
+
+```bash
+dotnet build MyDatabaseProject.sqlproj
+```
+
+Once you have a .dacpac, SqlPackage handles the deployment. Install it as a .NET global tool:
+
+Note: this can also be installed through the `WinGet` package manager.
+
+```bash
+dotnet tool install --global microsoft.sqlpackage
+
+# or
+
+winget install microsoft.sqlpackage
+```
+
+Then publish to a target database:
+
+```bash
+sqlpackage /Action:Publish /SourceFile:bin/Debug/MyDatabaseProject.dacpac /TargetConnectionString:"Server=myserver.database.windows.net;Database=mydb;Authentication=Active Directory Default"
+```
+
+### Setting Up Source Control
+
+To get started, initialize a Git repository in the project folder:
+
+```bash
+cd MyDatabaseProject
+
+git init
+```
+
+Next create a `.gitignore` file and start with something like this, adding on new files as needed:
+
+```txt
+.vs/
+bin/
+obj/
+*.dacpac
+*.user
+```
+
+Next commit your changes
+
+```bash
+git add .
+git commit -m "Initial commit of database project"
+```
+
+
+The declarative model handles schema objects like tables, views, and stored procedures, but some data is as essential as the schema itself. Status codes, lookup tables, default configurations, region lists. If that data disappears, the application breaks. It belongs in the project, versioned alongside the objects that depend on it.
+
+Predeployment and post-deployment scripts solve this problem. They're SQL scripts that execute during deployment but sit outside the compiled database model:
+
+A pre-deployment script runs before the deployment plan. Use it for tasks that must complete before schema changes, such as dropping constraints or migrating data.
+A post-deployment script runs after the deployment plan completes. Use it to populate reference data, seed lookup tables, or set application defaults.
+
+A project supports exactly one predeployment script and one post-deployment script. You declare them in the `.sqlproj` file with PreDeploy and PostDeploy item entries:
+
+```xml
+<ItemGroup>
+    <PreDeploy Include="prep-db.sql" />
+</ItemGroup>
+<ItemGroup>
+    <PostDeploy Include="PostDeploy.sql" />
+</ItemGroup>
+```
+
+One script file doesn't mean one giant file. Use SQLCMD `:r` syntax to pull in multiple files from a single entry point. A typical `PostDeploy.sql` looks like this:
+
+```sql
+:r .\Scripts\PostDeployment\seed-statuses.sql
+:r .\Scripts\PostDeployment\seed-regions.sql
+:r .\Scripts\PostDeployment\seed-app-settings.sql
+```
+
+Each referenced file needs to be excluded from the build, otherwise the build process tries to compile it as a schema object and fails. In the `.sqlproj` file, use Build Remove to prevent compilation and None Include to keep the file visible in the project:
+
+```xml
+<ItemGroup>
+    <Build Remove="Scripts\PostDeployment\seed-statuses.sql" />
+    <None Include="Scripts\PostDeployment\seed-statuses.sql" />
+</ItemGroup>
+```
+
+Post-deployment scripts run on every deployment, not just the first one. If you use plain `INSERT` statements, the second deployment fails with duplicate key violations. Use `MERGE` statements instead to make the scripts safe to run repeatedly:
+
+```sql
+MERGE INTO [dbo].[OrderStatuses] AS target
+USING (VALUES
+    (1, N'Pending'),
+    (2, N'Processing'),
+    (3, N'Shipped'),
+    (4, N'Delivered'),
+    (5, N'Cancelled')
+) AS source ([StatusID], [StatusName])
+ON target.[StatusID] = source.[StatusID]
+WHEN MATCHED THEN
+    UPDATE SET [StatusName] = source.[StatusName]
+WHEN NOT MATCHED THEN
+    INSERT ([StatusID], [StatusName])
+    VALUES (source.[StatusID], source.[StatusName]);
+```
+
+### Branching & Pull Requests
+
+When you start a database change, branch off `main`. Your work is isolated from everything else in progress. You modify the relevant .sql files, and because each object has its own file, a commit that adds a column to Customers touches only Tables/Customers.sql and nothing else.
+
+```bash
+git checkout -b feature/add-customer-email
+```
+After completing the changes, push the branch to the remote repository:
+
+```bash
+git add .
+git commit -m "Add Email column to Customers table"
+git push origin feature/add-customer-email
+```
+
+You can now create a pull request in Github/Azure Dev Ops as you would with a normal code repository, get approval and merge into main. 
+
+Conflicts happen when two branches modify the same file in ways Git can't reconcile on its own. In database projects, a common scenario is two developers editing the same CREATE TABLE statement. One adds a Phone column, the other adds Address, and both touch the same region of the file.
+
+To resolve the conflict:
+
+Pull the latest changes from main into your feature branch:
+
+```bash
+git checkout feature/add-customer-phone
+git pull origin main
+```
+
+Git marks the conflicting sections in the file. Open the file and review both versions.
+
+Edit the file to include both changes in the correct syntax.
+
+Mark the conflict as resolved and commit:
+
+```bash
+git add Tables/Customers.sql
+git commit -m "Resolve merge conflict: include both Phone and Address columns"
+```
+
+Always rebuild after resolving conflicts to make sure no errors have occured.
+
+### Handling Schema Drift
+
+Your SQL database project says the Customers table has 12 columns. Production has 13. Someone added a LoyaltyTier column directly through SQL Server Management Studio (SSMS) last Thursday during an incident. Your next deployment will quietly drop that column because the project doesn't know it exists. This type of situation is known as schema drift, and it's one of the ways CI/CD pipelines break production without warning.
+
+Schema drift is the gap between what your project defines and what actually exists in the live database. Common causes include:
+
+- Manual changes: someone opens a query window and runs an ALTER TABLE outside the normal workflow.
+- Emergency hotfixes: a production issue gets patched at 2 AM, and the fix never makes it back into the project.
+- Third-party tools: monitoring agents or Object-Relational Mapping (ORM) frameworks that create or modify objects behind the scenes.
+
+The danger isn't the drift itself. It's what happens next. Your pipeline deploys the .dacpac, SqlPackage calculates the diff, and every object the project doesn't know about gets dropped. Detecting drift before that deployment runs is critical.
+
+Schema comparison tools let you hold two database definitions side by side. You can compare any combination of a live database, a SQL database project, or a .dacpac file. When you compare a live database against your project, the results surface every difference, grouped by action type (Create, Alter, Delete) with the source and target definitions shown for each object.
+
+In Visual Studio or Visual Studio Code, launch schema compare from the SQL Server menu or the Database Projects view. Point the source at the live database and the target at the project. The comparison grid shows what's different and what would change if you brought them into alignment.
+
+### Implementing Into CI/CD Pipelines
+
+GitHub Actions workflows live in `.github/workflows/` and define your pipeline as YAML. The `azure/sql-action` action handles `.dacpac` deployment to Azure SQL Database.
+
+Here's a workflow that builds on every push to main and deploys to production:
+
+```yml
+# .github/workflows/sql-deploy.yml
+name: Build and Deploy SQL Project
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build SQL project
+      run: dotnet build ./Database.sqlproj -o ./output
+
+    - name: Upload dacpac artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: dacpac
+        path: ./output/Database.dacpac
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+    - name: Download dacpac artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: dacpac
+
+    - name: Install SqlPackage
+      run: dotnet tool install -g microsoft.sqlpackage
+
+    - uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - uses: azure/sql-action@v2.3
+      with:
+        connection-string: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
+        path: './Database.dacpac'
+        action: 'publish'
+```
+
+Both GitHub and Azure DevOps support environments with protection rules that gate deployments:
+
+- Required reviewers: one or more team members must approve before the deploy job runs. In GitHub, configure this setting under Settings > Environments > Protection rules.
+- Wait timers: add a delay between approval and execution, giving the team a window to reconsider.
+- Deployment branches: restrict which branches can target an environment. For example, only main deploys to production.
+
+### Unit Tests In SQL Projects
+
+SQL Server Data Tools (SSDT) in Visual Studio includes a built-in framework for database unit tests. Each test executes T-SQL against a live database and validates the results using test conditions.
+
+Each test has three sections that follow a setup-execute-cleanup pattern:
+
+- Pre-test: set up the data the test needs. Insert customer records, clear leftover data from previous runs.
+- Test: execute the operation you're testing. Call the stored procedure and query the view.
+- Post-test: clean up after the test so it doesn't contaminate the next run.
+
+After the test T-SQL runs, test conditions validate what came back. The most commonly used conditions are:
+
+- Row Count: verifies that the result set contains the expected number of rows.
+- Scalar Value: verifies that a specific cell in the result set contains the expected value.
+- Expected Schema: verifies that the result set has the expected column names and data types.
+
+Other built-in conditions include Data Checksum, Empty ResultSet, Not Empty ResultSet, and Execution Time.
+
+Setting up SQL Server unit tests in Visual Studio takes a few steps:
+
+- Open your SQL database project.
+- In SQL Server Object Explorer, find the stored procedure or function you want to test.
+- Right-click the object and select Create Unit Tests.
+- Choose or create a C# test project.
+- Set the test connection to your development database.
+- Select Automatically deploy the database project before unit tests are run. This option keeps the test database in sync with your latest project changes.
+
+The designer opens with a T-SQL template where you write your test logic and attach test conditions.
+
 
 ## Cool Nuget Packages
 
